@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -916,7 +917,14 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
     catalog_rows: list[dict[str, Any]] = []
 
     max_pages_per_member = max(1, int(args.max_pages_per_member))
+    limit_members = max(0, int(args.limit_members))
+    sleep_seconds = max(0.0, float(args.sleep_seconds))
+    detail_limit_per_member = args.detail_limit_per_member
+    if detail_limit_per_member is not None:
+        detail_limit_per_member = max(0, int(detail_limit_per_member))
+
     fetch_details = not args.skip_details
+    processed_members = 0
 
     for person_row in people_rows:
         if person_row.get("matched", "").lower() != "yes":
@@ -929,6 +937,11 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
         if not cspan_person_id:
             continue
 
+        if limit_members and processed_members >= limit_members:
+            break
+
+        processed_members += 1
+
         member_name = person_row.get("display_name", "") or person_row.get("cspan_name", "")
         member_first = person_row.get("input_first", "") or person_row.get("cspan_first_name", "")
         member_last = person_row.get("input_last", "") or person_row.get("cspan_last_name", "")
@@ -936,6 +949,7 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
         member_slug = slugify(member_name)
         cursor = ""
         page = 1
+        details_fetched_for_member = 0
 
         print(f"Building archive catalog for {member_name} ({cspan_person_id})")
 
@@ -947,6 +961,8 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
                 params["cursor"] = cursor
 
             data = client.get("/programs/search", params=params)
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
 
             raw_search_path = raw_search_dir / f"{member_slug}_personid_{cspan_person_id}_page_{page}.json"
             client.save_json(data, raw_search_path)
@@ -960,9 +976,19 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
                 raw_detail_path = ""
                 detail_fetched = "no"
 
-                if fetch_details and program_id:
+                detail_limit_reached = (
+                    detail_limit_per_member is not None
+                    and details_fetched_for_member >= detail_limit_per_member
+                )
+
+                if fetch_details and program_id and not detail_limit_reached:
                     try:
                         detail_data = client.get(f"/programs/{program_id}")
+                        if sleep_seconds:
+                            time.sleep(sleep_seconds)
+
+                        details_fetched_for_member += 1
+
                         if isinstance(detail_data, dict):
                             detail = detail_data
                         else:
@@ -977,6 +1003,8 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
                         detail_fetched = "error"
                         raw_detail_path = ""
                         program["detail_error"] = str(exc)
+                elif fetch_details and program_id and detail_limit_reached:
+                    detail_fetched = "skipped_limit"
 
                 row = build_catalog_row(
                     member_name=member_name,
@@ -992,6 +1020,8 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
 
                 if program.get("detail_error"):
                     row["notes"] = f"Detail fetch error: {program.get('detail_error')}"
+                elif detail_fetched == "skipped_limit":
+                    row["notes"] = "Detail fetch skipped because --detail-limit-per-member was reached."
 
                 catalog_rows.append(row)
 
@@ -1013,6 +1043,7 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
     write_csv_rows(output_path, catalog_rows, CATALOG_FIELDNAMES)
 
     print("Archive catalog complete.")
+    print(f"Members processed: {processed_members}")
     print(f"Rows: {len(catalog_rows)}")
     print(f"Saved catalog to: {output_path}")
     print(f"Saved raw JSON under: {raw_dir}")
@@ -1093,6 +1124,9 @@ def build_parser() -> argparse.ArgumentParser:
     archive_parser.add_argument("--raw-dir", default="output/raw", help="Folder for raw search/detail JSON.")
     archive_parser.add_argument("--sort", default="date desc", help="C-SPAN sort option. Example: date desc")
     archive_parser.add_argument("--max-pages-per-member", default=1, type=int, help="Maximum paginated result pages per member.")
+    archive_parser.add_argument("--limit-members", default=0, type=int, help="Only process the first N matched people. Use 0 for no limit.")
+    archive_parser.add_argument("--sleep-seconds", default=0.0, type=float, help="Sleep this many seconds after each C-SPAN API request.")
+    archive_parser.add_argument("--detail-limit-per-member", default=None, type=int, help="Only fetch details for the first N programs per member.")
     archive_parser.add_argument("--skip-details", action="store_true", help="Skip /programs/{videoId} detail fetches.")
     archive_parser.set_defaults(func=cmd_archive_catalog)
 
