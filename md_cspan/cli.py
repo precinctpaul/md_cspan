@@ -5,12 +5,15 @@ import csv
 import json
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from md_cspan.client import CSpanApiError, CSpanClient
 from md_cspan.config import load_settings
 
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 CATALOG_FIELDNAMES = [
     "member_name",
@@ -47,6 +50,137 @@ CATALOG_FIELDNAMES = [
     "raw_search_json_path",
     "raw_detail_json_path",
 ]
+
+INDEX_CATALOG_FIELDNAMES = CATALOG_FIELDNAMES + [
+    "source_run",
+]
+
+SEEN_PROGRAM_FIELDNAMES = [
+    "member_name",
+    "program_id",
+    "program_key",
+    "first_seen_at",
+    "last_seen_at",
+    "event_date",
+    "cspan_url",
+    "source_run",
+]
+
+UPDATE_INDEX_SUMMARY_FIELDNAMES = [
+    "run_started_at",
+    "run_finished_at",
+    "lookup_path",
+    "catalog_path",
+    "seen_path",
+    "members_available",
+    "members_processed",
+    "rows_seen",
+    "new_rows",
+    "existing_rows",
+    "api_errors",
+    "rate_limited",
+    "last_started_member_index",
+    "last_started_member_name",
+    "last_completed_member_index",
+    "last_completed_member_name",
+    "failed_member_index",
+    "failed_member_name",
+    "failed_reason",
+    "suggested_resume_start_member_index",
+    "suggested_resume_command",
+    "notes",
+]
+
+
+PRIORITY_CATALOG_FIELDNAMES = [
+    "member_name",
+    "matrix_priority",
+    "matched_keywords",
+    "match_source",
+    "event_title",
+    "event_date",
+    "cspan_url",
+    "program_id",
+    "source_type",
+    "event_type",
+    "content_bucket",
+    "youtube_use",
+    "priority_score",
+    "detail_fetched",
+    "description",
+    "match_strength",
+    "strong_match_count",
+    "broad_match_count",
+    "review_flag",
+]
+
+UNMATCHED_PRIORITY_FIELDNAMES = [
+    "member_name",
+    "matrix_priority",
+    "notes",
+]
+
+LEAD_EXPORT_FIELDNAMES = [
+    "review_rank",
+    "member_name",
+    "matrix_priority",
+    "priority_score",
+    "match_strength",
+    "strong_match_count",
+    "broad_match_count",
+    "matched_keywords",
+    "event_title",
+    "event_date",
+    "cspan_url",
+    "program_id",
+    "source_type",
+    "event_type",
+    "content_bucket",
+    "youtube_use",
+    "detail_fetched",
+    "description",
+    "review_status",
+    "review_notes",
+]
+
+HYDRATED_LEAD_FIELDNAMES = LEAD_EXPORT_FIELDNAMES + [
+    "detail_fetch_status",
+    "detail_fetch_error",
+    "caption_available",
+    "transcript_available",
+    "download_available",
+    "media_url",
+    "raw_detail_json_path",
+]
+
+PRIORITY_SEARCH_FIELDS = [
+    "event_title",
+    "description",
+    "matched_keywords",
+    "matched_topics",
+    "source_type",
+    "event_type",
+    "matched_people",
+]
+
+BROAD_PRIORITY_TERMS = {
+    "costs",
+    "cost",
+    "affordable",
+    "research",
+    "china",
+    "jobs",
+    "job",
+    "investment",
+    "accountability",
+    "infrastructure",
+    "community",
+    "communities",
+    "families",
+    "workers",
+}
+
+TOPIC_ALIASES_CSV = REPO_ROOT / "data/topic_aliases.csv"
 
 
 ISSUE_KEYWORDS = {
@@ -140,6 +274,344 @@ def write_csv_rows(output_path: Path, rows: list[dict[str, Any]], fieldnames: li
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def load_optional_csv_rows(input_path: Path) -> list[dict[str, str]]:
+    if not input_path.exists():
+        return []
+    return load_csv_rows(input_path)
+
+
+def usable_people_rows(people_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        row
+        for row in people_rows
+        if row.get("matched", "").lower() == "yes"
+        and row.get("match_rank", "") in ("", "1")
+        and row.get("cspan_person_id", "").strip()
+    ]
+
+
+def program_key_for_row(row: dict[str, Any]) -> str:
+    program_id = row.get("program_id", "").strip()
+    if program_id:
+        return program_id
+
+    return "|".join(
+        [
+            row.get("event_title", "").strip(),
+            row.get("event_date", "").strip(),
+            row.get("cspan_url", "").strip(),
+        ]
+    )
+
+
+def member_program_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (row.get("member_name", "").strip(), program_key_for_row(row))
+
+
+def row_member_name(row: dict[str, Any]) -> str:
+    for field in ["member_name", "member", "matched_member", "speaker", "matched_name"]:
+        value = row.get(field, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def row_event_date(row: dict[str, Any]) -> str:
+    for field in ["event_date", "program_date", "date"]:
+        value = row.get(field, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def row_title(row: dict[str, Any]) -> str:
+    for field in ["event_title", "program_title", "title"]:
+        value = row.get(field, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def row_url_value(row: dict[str, Any]) -> str:
+    for field in ["cspan_url", "program_url", "url", "video_url"]:
+        value = row.get(field, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def row_matches_member(row: dict[str, Any], member_name: str) -> bool:
+    member_lower = member_name.lower()
+    if row_member_name(row).lower() == member_lower:
+        return True
+    return member_lower in " ".join(str(value) for value in row.values()).lower()
+
+
+def topic_aliases(topic: str) -> list[str]:
+    clean_topic = topic.strip()
+    aliases_by_topic = load_topic_alias_rows(TOPIC_ALIASES_CSV)
+    terms = aliases_by_topic.get(normalize_topic_key(clean_topic), [clean_topic])
+    deduped_terms: list[str] = []
+    seen_terms: set[str] = set()
+    for term in terms:
+        key = term.lower()
+        if term and key not in seen_terms:
+            seen_terms.add(key)
+            deduped_terms.append(term)
+    return deduped_terms
+
+
+def split_alias_terms(value: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[;\n]+", value or "") if part.strip()]
+
+
+def normalize_topic_key(value: str) -> str:
+    key = re.sub(r"\s+", " ", (value or "").strip().lower())
+    return re.sub(r"\s*/\s*", "/", key)
+
+
+def load_topic_alias_rows(input_path: Path) -> dict[str, list[str]]:
+    aliases_by_topic: dict[str, list[str]] = {}
+    if not input_path.exists():
+        return aliases_by_topic
+
+    for row in load_optional_csv_rows(input_path):
+        topic = row.get("topic", "").strip()
+        if not topic:
+            continue
+
+        terms = [topic, *split_alias_terms(row.get("aliases", ""))]
+        deduped_terms: list[str] = []
+        seen_terms: set[str] = set()
+        for term in terms:
+            key = term.lower()
+            if term and key not in seen_terms:
+                seen_terms.add(key)
+                deduped_terms.append(term)
+        aliases_by_topic[normalize_topic_key(topic)] = deduped_terms
+    return aliases_by_topic
+
+
+def row_text(row: dict[str, Any]) -> str:
+    return " ".join(str(value) for value in row.values())
+
+
+def row_matches_any_term(row: dict[str, Any], terms: list[str]) -> bool:
+    text = row_text(row)
+    return any(priority_term_matches(term, text) for term in terms if term.strip())
+
+
+def row_matches_exact_topic(row: dict[str, Any], topic: str) -> bool:
+    topic_key = normalize_topic_key(topic)
+    for field in ["matrix_priority", "priority", "matched_keywords", "matched_terms", "matched_topics"]:
+        values = parse_keyword_terms(row.get(field, ""))
+        if any(normalize_topic_key(value) == topic_key for value in values):
+            return True
+    return False
+
+
+def matrix_topic_values(input_path: Path) -> list[str]:
+    topics = {
+        row.get("priority", "").strip()
+        for row in load_optional_csv_rows(input_path)
+        if row.get("priority", "").strip()
+    }
+    return sorted(topics, key=str.lower)
+
+
+def row_is_since(row: dict[str, Any], since: str) -> bool:
+    if not since:
+        return True
+    event_date = row_event_date(row)[:10]
+    if not event_date:
+        return True
+    return event_date >= since
+
+
+def is_rate_limit_error(exc: CSpanApiError) -> bool:
+    return "Status: 429" in str(exc)
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def update_index_summary_path(output_new_path: Path) -> Path:
+    name = output_new_path.name
+    if "new_programs" in name:
+        summary_name = name.replace("new_programs", "update_index", 1)
+    else:
+        summary_name = f"{output_new_path.stem}_summary{output_new_path.suffix}"
+
+    if not summary_name.endswith(f"_summary{output_new_path.suffix}"):
+        summary_name = f"{Path(summary_name).stem}_summary{output_new_path.suffix}"
+
+    return output_new_path.with_name(summary_name)
+
+
+def append_stem_suffix(path_value: str, suffix: str) -> str:
+    path = Path(path_value)
+    if path.suffix:
+        return str(path.with_name(f"{path.stem}{suffix}{path.suffix}"))
+    return f"{path_value}{suffix}"
+
+
+def build_update_index_resume_command(
+    args: argparse.Namespace,
+    resume_start_member_index: int,
+    failed_because_rate_limit: bool,
+    selected_member_count: int,
+) -> str:
+    original_start_member_index = max(1, int(args.start_member_index))
+    original_limit_members = max(0, int(args.limit_members))
+    if original_limit_members:
+        consumed_before_failure = max(0, resume_start_member_index - original_start_member_index)
+        resume_limit_members = max(1, original_limit_members - consumed_before_failure)
+    else:
+        resume_limit_members = 0
+
+    if selected_member_count and resume_limit_members:
+        resume_limit_members = min(resume_limit_members, selected_member_count)
+
+    sleep_seconds = max(float(args.sleep_seconds), 2.0) if failed_because_rate_limit else float(args.sleep_seconds)
+    command_parts = [
+        "python",
+        "-m",
+        "md_cspan.cli",
+        "update-index",
+        "--lookup",
+        str(args.lookup),
+        "--catalog",
+        str(args.catalog),
+        "--seen",
+        str(args.seen),
+        "--output-new",
+        append_stem_suffix(str(args.output_new), "_resume"),
+        "--raw-dir",
+        append_stem_suffix(str(args.raw_dir), "_resume"),
+        "--max-pages-per-member",
+        str(args.max_pages_per_member),
+        "--sleep-seconds",
+        f"{sleep_seconds:g}",
+        "--start-member-index",
+        str(resume_start_member_index),
+        "--limit-members",
+        str(resume_limit_members),
+    ]
+
+    if getattr(args, "sort", "date desc") != "date desc":
+        command_parts.extend(["--sort", str(args.sort)])
+    if getattr(args, "dry_run", False):
+        command_parts.append("--dry-run")
+
+    return " ".join(command_parts)
+
+
+def parse_keyword_terms(value: str) -> list[str]:
+    terms = []
+    for term in re.split(r"[,\n;]+", value or ""):
+        clean_term = term.strip()
+        if clean_term:
+            terms.append(clean_term)
+    return terms
+
+
+def build_priority_search_text(row: dict[str, Any]) -> str:
+    return " ".join(str(row.get(field, "")) for field in PRIORITY_SEARCH_FIELDS)
+
+
+def priority_term_matches(term: str, searchable_text: str) -> bool:
+    escaped_term = re.escape(term.strip())
+    if not escaped_term:
+        return False
+
+    pattern = rf"(?<!\w){escaped_term}(?!\w)"
+    return re.search(pattern, searchable_text, flags=re.IGNORECASE) is not None
+
+
+def get_matrix_priority(row: dict[str, Any]) -> str:
+    return row.get("matrix_priority", "") or row.get("priority", "")
+
+
+def get_matched_keywords(row: dict[str, Any]) -> str:
+    return row.get("matched_keywords", "") or row.get("matched_terms", "")
+
+
+def lead_dedupe_key(row: dict[str, Any], index: int) -> tuple[str, str, str]:
+    member_name = row.get("member_name", "")
+    program_id = row.get("program_id", "")
+    if program_id:
+        return (member_name, program_id, "")
+
+    return (
+        member_name,
+        "",
+        "|".join(
+            [
+                row.get("event_title", ""),
+                row.get("event_date", ""),
+                get_matrix_priority(row),
+            ]
+        ),
+    )
+
+
+def lead_dedupe_score(row: dict[str, Any], index: int) -> tuple[int, int, str, int]:
+    return (
+        int(row.get("priority_score", 0) or 0),
+        int(row.get("strong_match_count", 0) or 0),
+        row.get("event_date", ""),
+        -index,
+    )
+
+
+def program_from_lead_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row.get("program_id", ""),
+        "title": row.get("event_title", ""),
+        "date": row.get("event_date", ""),
+        "description": row.get("description", ""),
+        "url": row.get("cspan_url", ""),
+    }
+
+
+def merge_detail_into_lead_row(
+    row: dict[str, Any],
+    catalog_row: dict[str, Any],
+    detail_fetch_status: str,
+    detail_fetch_error: str = "",
+) -> dict[str, Any]:
+    updated_row = dict(row)
+    original_priority_score = row.get("priority_score", "")
+
+    for field in [
+        "event_title",
+        "event_date",
+        "cspan_url",
+        "source_type",
+        "event_type",
+        "content_bucket",
+        "youtube_use",
+        "detail_fetched",
+        "description",
+        "caption_available",
+        "transcript_available",
+        "download_available",
+        "media_url",
+        "raw_detail_json_path",
+    ]:
+        value = catalog_row.get(field, "")
+        if value:
+            updated_row[field] = value
+
+    updated_row["priority_score"] = original_priority_score
+    updated_row["detail_fetch_status"] = detail_fetch_status
+    updated_row["detail_fetch_error"] = detail_fetch_error
+    updated_row.setdefault("review_status", "")
+    updated_row.setdefault("review_notes", "")
+    return updated_row
 
 
 def slugify(value: str) -> str:
@@ -619,6 +1091,14 @@ def cmd_people_lookup(args: argparse.Namespace) -> int:
     raw_output_path = Path(args.raw_output)
 
     members = load_csv_rows(input_path)
+    aliases_by_display_name: dict[str, list[dict[str, str]]] = {}
+    aliases_path = getattr(args, "aliases", None)
+    if aliases_path:
+        for alias in load_csv_rows(Path(aliases_path)):
+            alias_display_name = alias.get("display_name", "").strip()
+            if alias_display_name:
+                aliases_by_display_name.setdefault(alias_display_name, []).append(alias)
+
     output_rows: list[dict[str, Any]] = []
     raw_results: dict[str, Any] = {}
 
@@ -645,6 +1125,56 @@ def cmd_people_lookup(args: argparse.Namespace) -> int:
         raw_results[display_name] = data
 
         people = normalize_people_response(data)
+        lookup_method = "normal"
+        alias_used = "no"
+        alias_first = ""
+        alias_last = ""
+        alias_query = ""
+        aliases_tried = False
+
+        if not people:
+            alias_attempts: list[dict[str, Any]] = []
+            for alias in aliases_by_display_name.get(display_name, []):
+                current_alias_first = alias.get("alias_first", "").strip()
+                current_alias_last = alias.get("alias_last", "").strip()
+                current_alias_query = alias.get("alias_query", "").strip()
+                alias_params: dict[str, Any] = {}
+
+                if current_alias_first:
+                    alias_params["first"] = current_alias_first
+                if current_alias_last:
+                    alias_params["last"] = current_alias_last
+                if current_alias_query:
+                    alias_params["query"] = current_alias_query
+                if not alias_params:
+                    continue
+
+                aliases_tried = True
+                print(f"  Trying alias for {display_name}")
+                alias_data = client.get("/people", params=alias_params)
+                alias_attempts.append(
+                    {
+                        "alias_first": current_alias_first,
+                        "alias_last": current_alias_last,
+                        "alias_query": current_alias_query,
+                        "response": alias_data,
+                    }
+                )
+                people = normalize_people_response(alias_data)
+
+                if people:
+                    lookup_method = "alias"
+                    alias_used = "yes"
+                    alias_first = current_alias_first
+                    alias_last = current_alias_last
+                    alias_query = current_alias_query
+                    break
+
+            if alias_attempts:
+                raw_results[display_name] = {
+                    "normal": data,
+                    "alias_attempts": alias_attempts,
+                }
 
         if not people:
             output_rows.append(
@@ -661,7 +1191,12 @@ def cmd_people_lookup(args: argparse.Namespace) -> int:
                     "cspan_last_name": "",
                     "cspan_title": "",
                     "cspan_image_path": "",
-                    "notes": "No match returned",
+                    "lookup_method": "alias" if aliases_tried else "normal",
+                    "alias_used": "no",
+                    "alias_first": "",
+                    "alias_last": "",
+                    "alias_query": "",
+                    "notes": "No alias match returned" if aliases_tried else "No normal match returned",
                 }
             )
             continue
@@ -681,6 +1216,11 @@ def cmd_people_lookup(args: argparse.Namespace) -> int:
                     "cspan_last_name": person.get("lastName", ""),
                     "cspan_title": person.get("title", ""),
                     "cspan_image_path": person.get("imagePath", ""),
+                    "lookup_method": lookup_method,
+                    "alias_used": alias_used,
+                    "alias_first": alias_first,
+                    "alias_last": alias_last,
+                    "alias_query": alias_query,
                     "notes": "",
                 }
             )
@@ -698,6 +1238,11 @@ def cmd_people_lookup(args: argparse.Namespace) -> int:
         "cspan_last_name",
         "cspan_title",
         "cspan_image_path",
+        "lookup_method",
+        "alias_used",
+        "alias_first",
+        "alias_last",
+        "alias_query",
         "notes",
     ]
 
@@ -917,6 +1462,7 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
     catalog_rows: list[dict[str, Any]] = []
 
     max_pages_per_member = max(1, int(args.max_pages_per_member))
+    start_member_index = max(1, int(args.start_member_index))
     limit_members = max(0, int(args.limit_members))
     sleep_seconds = max(0.0, float(args.sleep_seconds))
     detail_limit_per_member = args.detail_limit_per_member
@@ -924,24 +1470,26 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
         detail_limit_per_member = max(0, int(detail_limit_per_member))
 
     fetch_details = not args.skip_details
+    dedupe_programs = args.dedupe_programs
     processed_members = 0
+    seen_program_ids: set[str] = set()
+    duplicate_program_ids_skipped = 0
 
-    for person_row in people_rows:
-        if person_row.get("matched", "").lower() != "yes":
-            continue
+    usable_people_rows = [
+        row
+        for row in people_rows
+        if row.get("matched", "").lower() == "yes"
+        and row.get("match_rank", "") in ("", "1")
+        and row.get("cspan_person_id", "").strip()
+    ]
+    selected_people_rows = usable_people_rows[start_member_index - 1 :]
+    if limit_members:
+        selected_people_rows = selected_people_rows[:limit_members]
 
-        if person_row.get("match_rank", "") not in ("", "1"):
-            continue
-
-        cspan_person_id = person_row.get("cspan_person_id", "").strip()
-        if not cspan_person_id:
-            continue
-
-        if limit_members and processed_members >= limit_members:
-            break
-
+    for person_row in selected_people_rows:
         processed_members += 1
 
+        cspan_person_id = person_row.get("cspan_person_id", "").strip()
         member_name = person_row.get("display_name", "") or person_row.get("cspan_name", "")
         member_first = person_row.get("input_first", "") or person_row.get("cspan_first_name", "")
         member_last = person_row.get("input_last", "") or person_row.get("cspan_last_name", "")
@@ -972,6 +1520,12 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
 
             for program in programs:
                 program_id = extract_program_id(program)
+                if dedupe_programs and program_id:
+                    if program_id in seen_program_ids:
+                        duplicate_program_ids_skipped += 1
+                        continue
+                    seen_program_ids.add(program_id)
+
                 detail: dict[str, Any] | None = None
                 raw_detail_path = ""
                 detail_fetched = "no"
@@ -1043,11 +1597,867 @@ def cmd_archive_catalog(args: argparse.Namespace) -> int:
     write_csv_rows(output_path, catalog_rows, CATALOG_FIELDNAMES)
 
     print("Archive catalog complete.")
+    print(f"Usable matched members available: {len(usable_people_rows)}")
+    print(f"Start member index: {start_member_index}")
+    print(f"Limit members: {limit_members}")
     print(f"Members processed: {processed_members}")
     print(f"Rows: {len(catalog_rows)}")
+    if dedupe_programs:
+        print(f"Duplicate program IDs skipped: {duplicate_program_ids_skipped}")
     print(f"Saved catalog to: {output_path}")
     print(f"Saved raw JSON under: {raw_dir}")
     return 0
+
+
+def cmd_update_index(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    client = CSpanClient(settings)
+
+    run_started_at = utc_timestamp()
+    source_run = run_started_at
+
+    lookup_path = Path(args.lookup)
+    catalog_path = Path(args.catalog)
+    seen_path = Path(args.seen)
+    output_new_path = Path(args.output_new)
+    summary_path = update_index_summary_path(output_new_path)
+    raw_dir = Path(args.raw_dir)
+    raw_search_dir = raw_dir / "search"
+
+    people_rows = load_csv_rows(lookup_path)
+    existing_catalog_rows = load_optional_csv_rows(catalog_path)
+    existing_seen_rows = load_optional_csv_rows(seen_path)
+
+    all_usable_people_rows = usable_people_rows(people_rows)
+    start_member_index = max(1, int(args.start_member_index))
+    limit_members = max(0, int(args.limit_members))
+    selected_people_rows = all_usable_people_rows[start_member_index - 1 :]
+    if limit_members:
+        selected_people_rows = selected_people_rows[:limit_members]
+
+    max_pages_per_member = max(1, int(args.max_pages_per_member))
+    sleep_seconds = max(0.0, float(args.sleep_seconds))
+
+    seen_rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in existing_seen_rows:
+        member_name = row.get("member_name", "").strip()
+        program_key = row.get("program_key", "").strip() or row.get("program_id", "").strip()
+        if member_name and program_key:
+            seen_rows_by_key[(member_name, program_key)] = dict(row)
+
+    for row in existing_catalog_rows:
+        member_name = row.get("member_name", "").strip()
+        program_key = program_key_for_row(row)
+        if member_name and program_key and (member_name, program_key) not in seen_rows_by_key:
+            seen_rows_by_key[(member_name, program_key)] = {
+                "member_name": member_name,
+                "program_id": row.get("program_id", ""),
+                "program_key": program_key,
+                "first_seen_at": row.get("source_run", "") or run_started_at,
+                "last_seen_at": row.get("source_run", "") or run_started_at,
+                "event_date": row.get("event_date", ""),
+                "cspan_url": row.get("cspan_url", ""),
+                "source_run": row.get("source_run", "") or "catalog_seed",
+            }
+
+    new_rows: list[dict[str, Any]] = []
+    members_processed = 0
+    rows_seen = 0
+    new_row_count = 0
+    existing_row_count = 0
+    api_errors = 0
+    rate_limited = "no"
+    notes: list[str] = []
+    last_started_member_index = ""
+    last_started_member_name = ""
+    last_completed_member_index = ""
+    last_completed_member_name = ""
+    failed_member_index = ""
+    failed_member_name = ""
+    failed_reason = ""
+    suggested_resume_start_member_index = ""
+    suggested_resume_command = ""
+
+    for selected_offset, person_row in enumerate(selected_people_rows):
+        members_processed += 1
+        current_member_index = start_member_index + selected_offset
+
+        cspan_person_id = person_row.get("cspan_person_id", "").strip()
+        member_name = person_row.get("display_name", "") or person_row.get("cspan_name", "")
+        member_first = person_row.get("input_first", "") or person_row.get("cspan_first_name", "")
+        member_last = person_row.get("input_last", "") or person_row.get("cspan_last_name", "")
+        last_started_member_index = str(current_member_index)
+        last_started_member_name = member_name
+
+        member_slug = slugify(member_name)
+        cursor = ""
+        page = 1
+        member_failed = False
+
+        print(f"Updating index for {member_name} ({cspan_person_id})")
+
+        while page <= max_pages_per_member:
+            query = f"personid:{cspan_person_id}"
+            params: dict[str, Any] = {"query": query, "sort": args.sort}
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                data = client.get("/programs/search", params=params)
+            except CSpanApiError as exc:
+                api_errors += 1
+                error_note = f"{member_name} page {page}: {exc}"
+                notes.append(error_note.replace("\n", " "))
+                member_failed = True
+                failed_member_index = str(current_member_index)
+                failed_member_name = member_name
+                failed_reason = "429 Too Many Requests" if is_rate_limit_error(exc) else str(exc).replace("\n", " ")
+                suggested_resume_start_member_index = failed_member_index
+                suggested_resume_command = build_update_index_resume_command(
+                    args=args,
+                    resume_start_member_index=current_member_index,
+                    failed_because_rate_limit=is_rate_limit_error(exc),
+                    selected_member_count=len(selected_people_rows),
+                )
+                if is_rate_limit_error(exc):
+                    rate_limited = "yes"
+                    print("Rate limit hit; stopping update-index cleanly.")
+                    print(f"Rate limited at member index {current_member_index}: {member_name}")
+                    print(f"Suggested resume start index: {current_member_index}")
+                    print("Suggested resume command:")
+                    print(suggested_resume_command)
+                    break
+
+                print(f"  API error on page {page}; continuing to next member.")
+                break
+
+            raw_search_path = raw_search_dir / f"{member_slug}_personid_{cspan_person_id}_page_{page}.json"
+            client.save_json(data, raw_search_path)
+
+            programs = normalize_programs_response(data)
+            rows_seen += len(programs)
+            print(f"  Page {page}: {len(programs)} programs")
+
+            for program in programs:
+                row = build_catalog_row(
+                    member_name=member_name,
+                    member_first=member_first,
+                    member_last=member_last,
+                    cspan_person_id=cspan_person_id,
+                    program=program,
+                    detail=None,
+                    detail_fetched="no",
+                    raw_search_json_path=str(raw_search_path),
+                    raw_detail_json_path="",
+                )
+                row["source_run"] = source_run
+
+                key = member_program_key(row)
+                if key in seen_rows_by_key:
+                    existing_row_count += 1
+                    seen_row = seen_rows_by_key[key]
+                    seen_row["last_seen_at"] = run_started_at
+                    seen_row["event_date"] = row.get("event_date", "")
+                    seen_row["cspan_url"] = row.get("cspan_url", "")
+                    continue
+
+                new_row_count += 1
+                new_rows.append(row)
+                seen_rows_by_key[key] = {
+                    "member_name": row.get("member_name", ""),
+                    "program_id": row.get("program_id", ""),
+                    "program_key": key[1],
+                    "first_seen_at": run_started_at,
+                    "last_seen_at": run_started_at,
+                    "event_date": row.get("event_date", ""),
+                    "cspan_url": row.get("cspan_url", ""),
+                    "source_run": source_run,
+                }
+
+            cursor = get_cursor(data)
+            if not cursor or not programs:
+                break
+
+            page += 1
+
+        if not member_failed:
+            last_completed_member_index = str(current_member_index)
+            last_completed_member_name = member_name
+
+        if rate_limited == "yes":
+            break
+
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
+
+    catalog_rows_to_write = [dict(row) for row in existing_catalog_rows] + new_rows
+    seen_rows_to_write = list(seen_rows_by_key.values())
+
+    write_csv_rows(output_new_path, new_rows, INDEX_CATALOG_FIELDNAMES)
+    if args.dry_run:
+        notes.append("Dry run: catalog and seen ledger were not written.")
+    else:
+        write_csv_rows(catalog_path, catalog_rows_to_write, INDEX_CATALOG_FIELDNAMES)
+        write_csv_rows(seen_path, seen_rows_to_write, SEEN_PROGRAM_FIELDNAMES)
+
+    run_finished_at = utc_timestamp()
+    summary_rows = [
+        {
+            "run_started_at": run_started_at,
+            "run_finished_at": run_finished_at,
+            "lookup_path": str(lookup_path),
+            "catalog_path": str(catalog_path),
+            "seen_path": str(seen_path),
+            "members_available": len(all_usable_people_rows),
+            "members_processed": members_processed,
+            "rows_seen": rows_seen,
+            "new_rows": new_row_count,
+            "existing_rows": existing_row_count,
+            "api_errors": api_errors,
+            "rate_limited": rate_limited,
+            "last_started_member_index": last_started_member_index,
+            "last_started_member_name": last_started_member_name,
+            "last_completed_member_index": last_completed_member_index,
+            "last_completed_member_name": last_completed_member_name,
+            "failed_member_index": failed_member_index,
+            "failed_member_name": failed_member_name,
+            "failed_reason": failed_reason,
+            "suggested_resume_start_member_index": suggested_resume_start_member_index,
+            "suggested_resume_command": suggested_resume_command,
+            "notes": " | ".join(notes),
+        }
+    ]
+    write_csv_rows(summary_path, summary_rows, UPDATE_INDEX_SUMMARY_FIELDNAMES)
+
+    print("Index update complete.")
+    print(f"Dry run: {'yes' if args.dry_run else 'no'}")
+    print(f"Usable matched members available: {len(all_usable_people_rows)}")
+    print(f"Start member index: {start_member_index}")
+    print(f"Limit members: {limit_members}")
+    print(f"Members processed: {members_processed}")
+    print(f"Rows seen: {rows_seen}")
+    print(f"New rows: {new_row_count}")
+    print(f"Existing rows: {existing_row_count}")
+    print(f"API errors: {api_errors}")
+    print(f"Rate limited: {rate_limited}")
+    print(f"Last started member index: {last_started_member_index}")
+    print(f"Last started member name: {last_started_member_name}")
+    print(f"Last completed member index: {last_completed_member_index}")
+    print(f"Last completed member name: {last_completed_member_name}")
+    if failed_member_index:
+        print(f"Failed member index: {failed_member_index}")
+        print(f"Failed member name: {failed_member_name}")
+        print(f"Failed reason: {failed_reason}")
+        print(f"Suggested resume start index: {suggested_resume_start_member_index}")
+        print("Suggested resume command:")
+        print(suggested_resume_command)
+    if not args.dry_run:
+        print(f"Catalog rows written: {len(catalog_rows_to_write)}")
+        print(f"Seen ledger rows written: {len(seen_rows_to_write)}")
+    print(f"Saved new rows to: {output_new_path}")
+    print(f"Saved summary to: {summary_path}")
+    print(f"Saved raw JSON under: {raw_dir}")
+    return 0
+
+
+def cmd_merge_catalogs(args: argparse.Namespace) -> int:
+    catalog_rows: list[dict[str, Any]] = []
+    seen_program_ids: set[str] = set()
+    duplicate_program_ids_skipped = 0
+    total_input_rows = 0
+
+    for input_value in args.input:
+        rows = load_csv_rows(Path(input_value))
+        total_input_rows += len(rows)
+
+        for row in rows:
+            program_id = row.get("program_id", "").strip()
+            if args.dedupe_programs and program_id:
+                if program_id in seen_program_ids:
+                    duplicate_program_ids_skipped += 1
+                    continue
+                seen_program_ids.add(program_id)
+
+            catalog_rows.append(row)
+
+    write_csv_rows(Path(args.output), catalog_rows, CATALOG_FIELDNAMES)
+
+    print("Catalog merge complete.")
+    print(f"Input files count: {len(args.input)}")
+    print(f"Total input rows: {total_input_rows}")
+    print(f"Output rows: {len(catalog_rows)}")
+    print(f"Duplicate program IDs skipped: {duplicate_program_ids_skipped}")
+    print(f"Saved merged catalog to: {args.output}")
+    return 0
+
+
+def cmd_priority_catalog(args: argparse.Namespace) -> int:
+    catalog_rows = load_csv_rows(Path(args.catalog))
+    priority_rows = load_csv_rows(Path(args.priorities))
+    keyword_rows = load_csv_rows(Path(args.keywords))
+
+    priorities_by_member: dict[str, list[str]] = {}
+    for row in priority_rows:
+        display_name = row.get("display_name", "").strip()
+        priority = row.get("priority", "").strip()
+        if display_name and priority:
+            priorities_by_member.setdefault(display_name, []).append(priority)
+
+    terms_by_priority: dict[str, list[str]] = {}
+    source_by_priority: dict[str, str] = {}
+    for row in keyword_rows:
+        priority = row.get("priority", "").strip()
+        if not priority:
+            continue
+
+        terms = parse_keyword_terms(row.get("keywords", ""))
+        if terms:
+            terms_by_priority[priority] = terms
+            source_by_priority[priority] = "keywords"
+        else:
+            terms_by_priority[priority] = [priority]
+            source_by_priority[priority] = "priority_phrase"
+
+    matched_rows: list[dict[str, Any]] = []
+    matched_member_priorities: set[tuple[str, str]] = set()
+    members_with_catalog_rows = {
+        row.get("member_name", "").strip()
+        for row in catalog_rows
+        if row.get("member_name", "").strip()
+    }
+
+    for catalog_row in catalog_rows:
+        member_name = catalog_row.get("member_name", "").strip()
+        member_priorities = priorities_by_member.get(member_name, [])
+        if not member_priorities:
+            continue
+
+        searchable_text = build_priority_search_text(catalog_row)
+        for priority in member_priorities:
+            terms = terms_by_priority.get(priority, [priority])
+            matched_terms = [term for term in terms if priority_term_matches(term, searchable_text)]
+            if not matched_terms:
+                continue
+
+            strong_match_count = sum(1 for term in matched_terms if term.lower() not in BROAD_PRIORITY_TERMS)
+            broad_match_count = len(matched_terms) - strong_match_count
+            match_strength = "strong" if strong_match_count >= 1 else "broad_only"
+            review_flag = "" if match_strength == "strong" else "REVIEW_BROAD_ONLY"
+            base_priority_score = int(catalog_row.get("priority_score", 0) or 0)
+            scored_priority_score = base_priority_score + (strong_match_count * 2) + broad_match_count
+
+            matched_member_priorities.add((member_name, priority))
+            matched_rows.append(
+                {
+                    "member_name": member_name,
+                    "matrix_priority": priority,
+                    "matched_keywords": "; ".join(matched_terms),
+                    "match_source": source_by_priority.get(priority, "priority_phrase"),
+                    "match_strength": match_strength,
+                    "strong_match_count": strong_match_count,
+                    "broad_match_count": broad_match_count,
+                    "review_flag": review_flag,
+                    "event_title": catalog_row.get("event_title", ""),
+                    "event_date": catalog_row.get("event_date", ""),
+                    "cspan_url": catalog_row.get("cspan_url", ""),
+                    "program_id": catalog_row.get("program_id", ""),
+                    "source_type": catalog_row.get("source_type", ""),
+                    "event_type": catalog_row.get("event_type", ""),
+                    "content_bucket": catalog_row.get("content_bucket", ""),
+                    "youtube_use": catalog_row.get("youtube_use", ""),
+                    "priority_score": scored_priority_score,
+                    "detail_fetched": catalog_row.get("detail_fetched", ""),
+                    "description": catalog_row.get("description", ""),
+                }
+            )
+
+    unmatched_rows: list[dict[str, Any]] = []
+    for member_name, priorities in priorities_by_member.items():
+        for priority in priorities:
+            if member_name not in members_with_catalog_rows:
+                notes = "No catalog rows for member."
+            elif (member_name, priority) not in matched_member_priorities:
+                notes = "No matching catalog rows."
+            else:
+                continue
+
+            unmatched_rows.append(
+                {
+                    "member_name": member_name,
+                    "matrix_priority": priority,
+                    "notes": notes,
+                }
+            )
+
+    matched_rows.sort(key=lambda row: row.get("event_date", ""), reverse=True)
+    matched_rows.sort(key=lambda row: -int(row.get("priority_score", 0) or 0))
+    matched_rows.sort(key=lambda row: get_matrix_priority(row))
+    matched_rows.sort(key=lambda row: row.get("member_name", ""))
+    matched_rows.sort(key=lambda row: row.get("review_flag", ""))
+
+    output_path = Path(args.output)
+    unmatched_output_path = output_path.with_name(f"{output_path.stem}_unmatched_priorities{output_path.suffix}")
+    write_csv_rows(output_path, matched_rows, PRIORITY_CATALOG_FIELDNAMES)
+    write_csv_rows(unmatched_output_path, unmatched_rows, UNMATCHED_PRIORITY_FIELDNAMES)
+
+    unique_priorities = {row.get("priority", "").strip() for row in priority_rows if row.get("priority", "").strip()}
+
+    print("Priority catalog complete.")
+    print(f"Catalog rows read: {len(catalog_rows)}")
+    print(f"Members with catalog rows: {len(members_with_catalog_rows)}")
+    print(f"Priority rows read: {len(priority_rows)}")
+    print(f"Unique priorities read: {len(unique_priorities)}")
+    print(f"Matched rows: {len(matched_rows)}")
+    print(f"Members with at least one priority match: {len({row.get('member_name', '') for row in matched_rows})}")
+    print(f"Unmatched member-priority pairs: {len(unmatched_rows)}")
+    print(f"Saved priority catalog to: {output_path}")
+    print(f"Saved unmatched priorities to: {unmatched_output_path}")
+    return 0
+
+
+def cmd_lead_export(args: argparse.Namespace) -> int:
+    input_rows = load_csv_rows(Path(args.input))
+    per_member = max(1, int(args.per_member))
+    filtered_rows = []
+    seen_exact_rows: set[tuple[str, str, str]] = set()
+    duplicate_rows_skipped = 0
+
+    for row in input_rows:
+        if args.strong_only and row.get("review_flag", "") == "REVIEW_BROAD_ONLY":
+            continue
+
+        member_name = row.get("member_name", "")
+        program_id = row.get("program_id", "")
+        priority = get_matrix_priority(row)
+        exact_key = (member_name, program_id, priority)
+        if program_id and exact_key in seen_exact_rows:
+            duplicate_rows_skipped += 1
+            continue
+        if program_id:
+            seen_exact_rows.add(exact_key)
+
+        filtered_rows.append(row)
+
+    rows_before_dedupe = len(filtered_rows)
+    rows_after_dedupe = rows_before_dedupe
+    member_program_rows_skipped = 0
+    if args.dedupe_programs_per_member:
+        best_rows_by_key: dict[tuple[str, str, str], tuple[dict[str, Any], int]] = {}
+        for index, row in enumerate(filtered_rows):
+            key = lead_dedupe_key(row, index)
+            current = best_rows_by_key.get(key)
+            if current is None:
+                best_rows_by_key[key] = (row, index)
+                continue
+
+            current_row, current_index = current
+            if lead_dedupe_score(row, index) > lead_dedupe_score(current_row, current_index):
+                best_rows_by_key[key] = (row, index)
+
+        filtered_rows = [row for row, _index in sorted(best_rows_by_key.values(), key=lambda item: item[1])]
+        rows_after_dedupe = len(filtered_rows)
+        member_program_rows_skipped = rows_before_dedupe - rows_after_dedupe
+
+    filtered_rows.sort(key=lambda row: row.get("event_date", ""), reverse=True)
+    filtered_rows.sort(key=lambda row: -int(row.get("priority_score", 0) or 0))
+    filtered_rows.sort(key=lambda row: row.get("member_name", ""))
+
+    output_rows: list[dict[str, Any]] = []
+    member_counts: dict[str, int] = {}
+    for row in filtered_rows:
+        member_name = row.get("member_name", "")
+        current_count = member_counts.get(member_name, 0)
+        if current_count >= per_member:
+            continue
+
+        review_rank = current_count + 1
+        member_counts[member_name] = review_rank
+        output_rows.append(
+            {
+                "review_rank": review_rank,
+                "member_name": member_name,
+                "matrix_priority": get_matrix_priority(row),
+                "priority_score": row.get("priority_score", ""),
+                "match_strength": row.get("match_strength", ""),
+                "strong_match_count": row.get("strong_match_count", ""),
+                "broad_match_count": row.get("broad_match_count", ""),
+                "matched_keywords": get_matched_keywords(row),
+                "event_title": row.get("event_title", ""),
+                "event_date": row.get("event_date", ""),
+                "cspan_url": row.get("cspan_url", ""),
+                "program_id": row.get("program_id", ""),
+                "source_type": row.get("source_type", ""),
+                "event_type": row.get("event_type", ""),
+                "content_bucket": row.get("content_bucket", ""),
+                "youtube_use": row.get("youtube_use", ""),
+                "detail_fetched": row.get("detail_fetched", ""),
+                "description": row.get("description", ""),
+                "review_status": "",
+                "review_notes": "",
+            }
+        )
+
+    write_csv_rows(Path(args.output), output_rows, LEAD_EXPORT_FIELDNAMES)
+
+    print("Lead export complete.")
+    print(f"Input rows: {len(input_rows)}")
+    print(f"Rows after filters: {len(filtered_rows)}")
+    print(f"Exact duplicate rows skipped: {duplicate_rows_skipped}")
+    if args.dedupe_programs_per_member:
+        print(f"Rows before dedupe: {rows_before_dedupe}")
+        print(f"Rows after dedupe: {rows_after_dedupe}")
+        print(f"Duplicate member-program rows skipped: {member_program_rows_skipped}")
+    print(f"Per member limit: {per_member}")
+    print(f"Output rows: {len(output_rows)}")
+    print(f"Members included: {len(member_counts)}")
+    print(f"Saved lead export to: {args.output}")
+    return 0
+
+
+def cmd_hydrate_leads(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    client = CSpanClient(settings)
+
+    input_rows = load_csv_rows(Path(args.input))
+    output_path = Path(args.output)
+    raw_dir = Path(args.raw_dir)
+    sleep_seconds = max(0.0, float(args.sleep_seconds))
+    max_detail_calls = args.max_detail_calls
+    if max_detail_calls is not None:
+        max_detail_calls = max(0, int(max_detail_calls))
+
+    rows_already_detailed = sum(1 for row in input_rows if row.get("detail_fetched", "") == "yes")
+    program_ids_needing_detail = {
+        row.get("program_id", "").strip()
+        for row in input_rows
+        if row.get("program_id", "").strip()
+        and (args.force or row.get("detail_fetched", "") != "yes")
+    }
+
+    detail_cache: dict[str, dict[str, Any]] = {}
+    output_rows: list[dict[str, Any]] = []
+    detail_calls_attempted = 0
+    detail_calls_succeeded = 0
+    detail_calls_failed = 0
+
+    for row in input_rows:
+        program_id = row.get("program_id", "").strip()
+        if not program_id:
+            updated_row = dict(row)
+            updated_row["detail_fetch_status"] = "skipped_no_program_id"
+            updated_row["detail_fetch_error"] = ""
+            output_rows.append(updated_row)
+            continue
+
+        if row.get("detail_fetched", "") == "yes" and not args.force:
+            updated_row = dict(row)
+            updated_row["detail_fetch_status"] = "already_detail"
+            updated_row["detail_fetch_error"] = ""
+            output_rows.append(updated_row)
+            continue
+
+        cached_detail = detail_cache.get(program_id)
+        cache_hit = cached_detail is not None
+        if cached_detail is None:
+            if max_detail_calls is not None and detail_calls_attempted >= max_detail_calls:
+                updated_row = dict(row)
+                updated_row["detail_fetch_status"] = "max_detail_calls_reached"
+                updated_row["detail_fetch_error"] = ""
+                output_rows.append(updated_row)
+                continue
+
+            detail_calls_attempted += 1
+            raw_detail_path = raw_dir / f"{program_id}.json"
+            print(f"Fetching detail for program {program_id}")
+            try:
+                detail_data = client.get(f"/programs/{program_id}")
+                if sleep_seconds:
+                    time.sleep(sleep_seconds)
+
+                client.save_json(detail_data, raw_detail_path)
+                detail = detail_data if isinstance(detail_data, dict) else {"data": detail_data}
+                cached_detail = {
+                    "detail": detail,
+                    "raw_detail_json_path": str(raw_detail_path),
+                    "status": "fetched",
+                    "error": "",
+                }
+                detail_cache[program_id] = cached_detail
+                detail_calls_succeeded += 1
+            except CSpanApiError as exc:
+                if sleep_seconds:
+                    time.sleep(sleep_seconds)
+
+                cached_detail = {
+                    "detail": None,
+                    "raw_detail_json_path": "",
+                    "status": "error",
+                    "error": str(exc),
+                }
+                detail_cache[program_id] = cached_detail
+                detail_calls_failed += 1
+
+        detail = cached_detail.get("detail")
+        if detail is None:
+            updated_row = dict(row)
+            updated_row["detail_fetch_status"] = cached_detail.get("status", "error")
+            updated_row["detail_fetch_error"] = cached_detail.get("error", "")
+            output_rows.append(updated_row)
+            continue
+
+        program = program_from_lead_row(row)
+        catalog_row = build_catalog_row(
+            member_name=row.get("member_name", ""),
+            member_first="",
+            member_last="",
+            cspan_person_id="",
+            program=program,
+            detail=detail,
+            detail_fetched="yes",
+            raw_search_json_path="",
+            raw_detail_json_path=cached_detail.get("raw_detail_json_path", ""),
+        )
+
+        status = "reused" if cache_hit and cached_detail.get("status") == "fetched" else cached_detail.get("status", "fetched")
+
+        output_rows.append(
+            merge_detail_into_lead_row(
+                row,
+                catalog_row,
+                detail_fetch_status=status,
+                detail_fetch_error="",
+            )
+        )
+
+    write_csv_rows(output_path, output_rows, HYDRATED_LEAD_FIELDNAMES)
+
+    print("Lead hydration complete.")
+    print(f"Input rows: {len(input_rows)}")
+    print(f"Rows already detail_fetched=yes: {rows_already_detailed}")
+    print(f"Unique program IDs needing detail: {len(program_ids_needing_detail)}")
+    print(f"Detail calls attempted: {detail_calls_attempted}")
+    print(f"Detail calls succeeded: {detail_calls_succeeded}")
+    print(f"Detail calls failed: {detail_calls_failed}")
+    print(f"Output rows: {len(output_rows)}")
+    print(f"Saved hydrated leads to: {output_path}")
+    print(f"Saved raw detail JSON under: {raw_dir}")
+    return 0
+
+
+def cmd_audit_member(args: argparse.Namespace) -> int:
+    member_name = args.member.strip()
+    if not member_name:
+        raise ValueError("--member cannot be blank.")
+
+    since = args.since.strip()
+    lookup_rows = load_optional_csv_rows(Path(args.lookup))
+    catalog_rows = load_optional_csv_rows(Path(args.catalog))
+    seen_rows = load_optional_csv_rows(Path(args.seen))
+    priority_rows = load_optional_csv_rows(Path(args.priority_catalog))
+    review_rows = load_optional_csv_rows(Path(args.review_csv))
+    reviewed_rows = load_optional_csv_rows(Path(args.reviewed_csv)) if args.reviewed_csv else []
+
+    lookup_match = next(
+        (
+            row
+            for row in lookup_rows
+            if row.get("display_name", "").strip().lower() == member_name.lower()
+            or row.get("cspan_name", "").strip().lower() == member_name.lower()
+        ),
+        {},
+    )
+    cspan_person_id = lookup_match.get("cspan_person_id", "")
+    search_terms = [member_name]
+    if cspan_person_id:
+        search_terms.append(f"personid:{cspan_person_id}")
+
+    catalog_matches = [
+        row for row in catalog_rows
+        if row_matches_member(row, member_name) and row_is_since(row, since)
+    ]
+    seen_matches = [
+        row for row in seen_rows
+        if row_matches_member(row, member_name) and row_is_since(row, since)
+    ]
+    priority_matches = [
+        row for row in priority_rows
+        if row_matches_member(row, member_name) and row_is_since(row, since)
+    ]
+    review_matches = [
+        row for row in review_rows
+        if row_matches_member(row, member_name) and row_is_since(row, since)
+    ]
+    reviewed_matches = [
+        row for row in reviewed_rows
+        if row_matches_member(row, member_name) and row_is_since(row, since)
+    ]
+
+    duplicate_groups = [
+        group_key
+        for group_key, count in duplicate_member_program_counts(catalog_matches).items()
+        if count > 1
+    ]
+
+    priority_program_keys = {member_program_key(row) for row in priority_matches}
+    review_program_keys = {member_program_key(row) for row in review_matches}
+    catalog_program_keys = {member_program_key(row) for row in catalog_matches}
+    excluded_by_priority = len(catalog_program_keys - priority_program_keys)
+    excluded_by_review_export = len(catalog_program_keys - review_program_keys)
+
+    print("Member audit")
+    print(f"Member name: {member_name}")
+    print(f"C-SPAN person ID from lookup: {cspan_person_id}")
+    print(f"Search terms used locally: {', '.join(search_terms)}")
+    print(f"Date range: {since or 'all'} through current local CSV contents")
+    print(f"Master catalog: {args.catalog}")
+    print(f"Current review CSV: {args.review_csv}")
+    if args.reviewed_csv:
+        print(f"Reviewed CSV: {args.reviewed_csv}")
+    print("")
+    print(f"Count in master catalog: {len(catalog_matches)}")
+    print(f"Count in seen ledger: {len(seen_matches)}")
+    print(f"Count in priority catalog: {len(priority_matches)}")
+    print(f"Count in current top review CSV: {len(review_matches)}")
+    if args.reviewed_csv:
+        print(f"Count in reviewed CSV: {len(reviewed_matches)}")
+    else:
+        print("Count in reviewed CSV: not checked")
+    print(f"Count excluded by seen ledger: not applicable to master catalog; seen rows for member/date = {len(seen_matches)}")
+    print(f"Count excluded by priority filters: {excluded_by_priority}")
+    print(f"Count excluded by lead-export/dedupe/review narrowing: {excluded_by_review_export}")
+    print(f"Duplicate member_name + program_id groups in master catalog matches: {len(duplicate_groups)}")
+    print("")
+    print("Top matching rows:")
+
+    sorted_matches = sorted(
+        catalog_matches,
+        key=lambda row: row_event_date(row),
+        reverse=True,
+    )
+    for index, row in enumerate(sorted_matches[:25], start=1):
+        print(
+            f"{index:>2}. {row_event_date(row)[:10]} | "
+            f"{row_title(row)} | {row_url_value(row)} | {args.catalog}"
+        )
+
+    return 0
+
+
+def cmd_audit_member_topic(args: argparse.Namespace) -> int:
+    member_name = args.member.strip()
+    topic = args.topic.strip()
+    since = args.since.strip()
+    if not member_name:
+        raise ValueError("--member cannot be blank.")
+    if not topic:
+        raise ValueError("--topic cannot be blank.")
+
+    catalog_rows = load_optional_csv_rows(Path(args.catalog))
+    aliases = topic_aliases(topic)
+    topic_only_rows = [
+        row for row in catalog_rows
+        if row_is_since(row, since) and row_matches_any_term(row, aliases)
+    ]
+    member_rows = [
+        row for row in catalog_rows
+        if row_is_since(row, since) and row_matches_member(row, member_name)
+    ]
+    exact_topic_rows = [
+        row for row in member_rows
+        if row_matches_exact_topic(row, topic)
+    ]
+    alias_topic_rows = [
+        row for row in member_rows
+        if row_matches_any_term(row, aliases)
+    ]
+    member_topic_missing_rows = [
+        row for row in member_rows
+        if not row_matches_any_term(row, aliases)
+    ]
+    topic_without_member_rows = [
+        row for row in topic_only_rows
+        if not row_matches_member(row, member_name)
+    ]
+
+    print("Member-topic audit")
+    print(f"Member: {member_name}")
+    print(f"Topic: {topic}")
+    print(f"Topic aliases used: {', '.join(aliases)}")
+    print(f"Date range: {since or 'all'} through current local CSV contents")
+    print(f"Catalog: {args.catalog}")
+    print("")
+    print(f"Matching rows in master catalog: {len(alias_topic_rows)}")
+    print(f"Matching rows by exact topic label: {len(exact_topic_rows)}")
+    print(f"Matching rows by aliases: {len(alias_topic_rows)}")
+    print(f"Matching rows where member is associated but topic is missing: {len(member_topic_missing_rows)}")
+    print(f"Matching rows where topic appears but member is not associated: {len(topic_without_member_rows)}")
+    print("")
+    print("Top candidate rows:")
+
+    sorted_candidates = sorted(alias_topic_rows, key=lambda row: row_event_date(row), reverse=True)
+    for index, row in enumerate(sorted_candidates[:25], start=1):
+        description = row.get("description", "").replace("\n", " ")
+        print(
+            f"{index:>2}. {row_event_date(row)[:10]} | {row_title(row)} | "
+            f"{row_url_value(row)} | {description[:220]}"
+        )
+
+    return 0
+
+
+def cmd_audit_topic_aliases(args: argparse.Namespace) -> int:
+    priorities_path = Path(args.priorities)
+    aliases_path = Path(args.aliases)
+    matrix_topics = matrix_topic_values(priorities_path)
+    aliases_by_topic = load_topic_alias_rows(aliases_path)
+    missing_topics = [
+        topic for topic in matrix_topics
+        if normalize_topic_key(topic) not in aliases_by_topic
+    ]
+    weak_topics = [
+        topic for topic in matrix_topics
+        if len(aliases_by_topic.get(normalize_topic_key(topic), [])) < 3
+    ]
+
+    print("Topic alias audit")
+    print(f"Priorities: {priorities_path}")
+    print(f"Aliases: {aliases_path}")
+    print(f"Total matrix topics: {len(matrix_topics)}")
+    print(f"Topics with aliases: {len(matrix_topics) - len(missing_topics)}")
+    print(f"Topics missing aliases: {len(missing_topics)}")
+    print(f"Topics with weak aliases (<3): {len(weak_topics)}")
+    print("")
+
+    if missing_topics:
+        print("Missing aliases:")
+        for topic in missing_topics:
+            print(f"- {topic}")
+        print("")
+
+    if weak_topics:
+        print("Weak aliases:")
+        for topic in weak_topics:
+            count = len(aliases_by_topic.get(normalize_topic_key(topic), []))
+            print(f"- {topic}: {count}")
+        print("")
+
+    print("Alias count per topic:")
+    for topic in matrix_topics:
+        count = len(aliases_by_topic.get(normalize_topic_key(topic), []))
+        print(f"- {topic}: {count}")
+
+    return 0
+
+
+def duplicate_member_program_counts(rows: list[dict[str, Any]]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        program_id = row.get("program_id", "").strip()
+        if not program_id:
+            continue
+        key = (row_member_name(row), program_id)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1082,6 +2492,7 @@ def build_parser() -> argparse.ArgumentParser:
     people_parser.add_argument("--input", default="data/members.csv", help="Input CSV with first,last,display_name columns.")
     people_parser.add_argument("--output", default="output/people_lookup.csv", help="Output CSV path.")
     people_parser.add_argument("--raw-output", default="output/people_lookup_raw.json", help="Raw JSON output path.")
+    people_parser.add_argument("--aliases", help="Optional CSV with display_name,alias_first,alias_last,alias_query columns.")
     people_parser.set_defaults(func=cmd_people_lookup)
 
     program_search_parser = subparsers.add_parser(
@@ -1124,11 +2535,104 @@ def build_parser() -> argparse.ArgumentParser:
     archive_parser.add_argument("--raw-dir", default="output/raw", help="Folder for raw search/detail JSON.")
     archive_parser.add_argument("--sort", default="date desc", help="C-SPAN sort option. Example: date desc")
     archive_parser.add_argument("--max-pages-per-member", default=1, type=int, help="Maximum paginated result pages per member.")
+    archive_parser.add_argument("--start-member-index", default=1, type=int, help="Start at this 1-based usable matched member index.")
     archive_parser.add_argument("--limit-members", default=0, type=int, help="Only process the first N matched people. Use 0 for no limit.")
     archive_parser.add_argument("--sleep-seconds", default=0.0, type=float, help="Sleep this many seconds after each C-SPAN API request.")
     archive_parser.add_argument("--detail-limit-per-member", default=None, type=int, help="Only fetch details for the first N programs per member.")
     archive_parser.add_argument("--skip-details", action="store_true", help="Skip /programs/{videoId} detail fetches.")
+    archive_parser.add_argument("--dedupe-programs", action="store_true", help="Skip duplicate program IDs, preserving the first encountered row.")
     archive_parser.set_defaults(func=cmd_archive_catalog)
+
+    update_index_parser = subparsers.add_parser(
+        "update-index",
+        help="Update a persistent member/program C-SPAN discovery index.",
+    )
+    update_index_parser.add_argument("--lookup", required=True, help="Reviewed people lookup CSV.")
+    update_index_parser.add_argument("--catalog", required=True, help="Persistent master catalog CSV.")
+    update_index_parser.add_argument("--seen", required=True, help="Persistent seen-program ledger CSV.")
+    update_index_parser.add_argument("--output-new", required=True, help="Output CSV containing only newly discovered rows.")
+    update_index_parser.add_argument("--raw-dir", default="output/raw_update_index", help="Folder for raw search JSON.")
+    update_index_parser.add_argument("--sort", default="date desc", help="C-SPAN sort option. Example: date desc")
+    update_index_parser.add_argument("--max-pages-per-member", default=1, type=int, help="Maximum paginated result pages per member.")
+    update_index_parser.add_argument("--start-member-index", default=1, type=int, help="Start at this 1-based usable matched member index.")
+    update_index_parser.add_argument("--limit-members", default=0, type=int, help="Only process N matched people. Use 0 for no limit.")
+    update_index_parser.add_argument("--sleep-seconds", default=1.0, type=float, help="Sleep this many seconds between member searches.")
+    update_index_parser.add_argument("--dry-run", action="store_true", help="Search and write output-new/summary without writing catalog or seen ledger.")
+    update_index_parser.set_defaults(func=cmd_update_index)
+
+    merge_parser = subparsers.add_parser(
+        "merge-catalogs",
+        help="Merge archive catalog CSVs.",
+    )
+    merge_parser.add_argument("--input", action="append", required=True, help="Input archive catalog CSV. Can be repeated.")
+    merge_parser.add_argument("--output", required=True, help="Output merged catalog CSV path.")
+    merge_parser.add_argument("--dedupe-programs", action="store_true", help="Skip duplicate program IDs, preserving the first encountered row.")
+    merge_parser.set_defaults(func=cmd_merge_catalogs)
+
+    priority_parser = subparsers.add_parser(
+        "priority-catalog",
+        help="Find local catalog rows matching member priorities.",
+    )
+    priority_parser.add_argument("--catalog", required=True, help="Existing archive catalog CSV.")
+    priority_parser.add_argument("--priorities", required=True, help="CSV with display_name,priority rows.")
+    priority_parser.add_argument("--keywords", required=True, help="CSV with priority,keywords,notes rows.")
+    priority_parser.add_argument("--output", required=True, help="Output priority catalog CSV path.")
+    priority_parser.set_defaults(func=cmd_priority_catalog)
+
+    lead_parser = subparsers.add_parser(
+        "lead-export",
+        help="Export a per-member review list from a scored priority catalog.",
+    )
+    lead_parser.add_argument("--input", required=True, help="Input scored priority catalog CSV.")
+    lead_parser.add_argument("--output", required=True, help="Output lead review CSV path.")
+    lead_parser.add_argument("--per-member", default=5, type=int, help="Maximum rows to keep per member.")
+    lead_parser.add_argument("--strong-only", action="store_true", help="Exclude rows flagged REVIEW_BROAD_ONLY.")
+    lead_parser.add_argument("--dedupe-programs-per-member", action="store_true", help="Keep one row per member/program before ranking.")
+    lead_parser.set_defaults(func=cmd_lead_export)
+
+    hydrate_parser = subparsers.add_parser(
+        "hydrate-leads",
+        help="Fetch program details for an existing lead-export CSV.",
+    )
+    hydrate_parser.add_argument("--input", required=True, help="Input lead-export CSV.")
+    hydrate_parser.add_argument("--output", required=True, help="Output hydrated lead CSV.")
+    hydrate_parser.add_argument("--raw-dir", default="output/raw_hydrated_priority_leads", help="Folder for raw detail JSON.")
+    hydrate_parser.add_argument("--sleep-seconds", default=1.0, type=float, help="Sleep this many seconds after each detail request.")
+    hydrate_parser.add_argument("--force", action="store_true", help="Refetch rows even when detail_fetched is already yes.")
+    hydrate_parser.add_argument("--max-detail-calls", default=None, type=int, help="Only make this many detail calls. Intended for testing.")
+    hydrate_parser.set_defaults(func=cmd_hydrate_leads)
+
+    audit_parser = subparsers.add_parser(
+        "audit-member",
+        help="Audit local CSV/index coverage for one member.",
+    )
+    audit_parser.add_argument("--member", required=True, help="Member display name to audit.")
+    audit_parser.add_argument("--since", default="", help="Only count rows on or after this YYYY-MM-DD date.")
+    audit_parser.add_argument("--lookup", default="output/people_lookup_majority_democrats_reviewed.csv", help="Reviewed people lookup CSV.")
+    audit_parser.add_argument("--catalog", default="output/cspan_member_programs_all.csv", help="Master catalog CSV.")
+    audit_parser.add_argument("--seen", default="output/cspan_seen_programs.csv", help="Seen ledger CSV.")
+    audit_parser.add_argument("--priority-catalog", default="output/cspan_priority_catalog_md_wordbound_renamed.csv", help="Priority catalog CSV to compare.")
+    audit_parser.add_argument("--review-csv", default="output/cspan_priority_leads_md_top_unique_programs_wordbound_renamed.csv", help="Review/export CSV to compare.")
+    audit_parser.add_argument("--reviewed-csv", default="", help="Optional reviewed CSV to compare.")
+    audit_parser.set_defaults(func=cmd_audit_member)
+
+    audit_topic_parser = subparsers.add_parser(
+        "audit-member-topic",
+        help="Audit local CSV/index coverage for one member + topic.",
+    )
+    audit_topic_parser.add_argument("--member", required=True, help="Member display name to audit.")
+    audit_topic_parser.add_argument("--topic", required=True, help="Matrix topic to audit.")
+    audit_topic_parser.add_argument("--since", default="", help="Only count rows on or after this YYYY-MM-DD date.")
+    audit_topic_parser.add_argument("--catalog", default="output/cspan_member_programs_all.csv", help="Master catalog CSV.")
+    audit_topic_parser.set_defaults(func=cmd_audit_member_topic)
+
+    audit_alias_parser = subparsers.add_parser(
+        "audit-topic-aliases",
+        help="Audit topic alias coverage against the member matrix priorities.",
+    )
+    audit_alias_parser.add_argument("--priorities", default="data/member_priorities.csv", help="Matrix priorities CSV.")
+    audit_alias_parser.add_argument("--aliases", default=str(TOPIC_ALIASES_CSV), help="Topic aliases CSV.")
+    audit_alias_parser.set_defaults(func=cmd_audit_topic_aliases)
 
     return parser
 
