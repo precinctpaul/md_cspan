@@ -50,3 +50,27 @@ output\cspan_member_programs_all.csv
 ```
 
 Priority and lead-export CSVs are narrower views of the broad catalog. Use the browser to search, filter, sort, inspect member/topic fields, and open C-SPAN links. It is read-only: not a manual review or triage app, and it does not write reviewed CSVs.
+
+The tracked people list lives at:
+
+```text
+data\tracked_people.csv
+```
+
+It includes Majority Democrats, The Bench, matrix members, and selected external figures. People outside the issue matrix can still appear in the browser and archive audit, but may not have matrix topics.
+
+## Archive Completeness Audit
+
+Audit local coverage from the start of the current Congress:
+
+```bat
+python -m md_cspan.cli audit-archive-completeness --since 2025-01-03
+```
+
+The audit compares tracked people against the master catalog, seen ledger, priority leads, and browser source CSV. It writes:
+
+```text
+output\cspan_archive_completeness_audit.csv
+```
+
+For discovery reruns, the existing `update-index` command can use a people lookup CSV or `data\tracked_people.csv` once C-SPAN person IDs are populated.

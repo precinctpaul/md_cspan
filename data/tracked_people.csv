@@ -1,0 +1,74 @@
+name,group,role,party_or_affiliation,person_type,aliases,cspan_person_id,active_from,active_to,notes
+Ruben Gallego,Majority Democrats,US Senator,Democratic,matrix_member,,77233,2025-01-03,,
+Buffy Wicks,Majority Democrats,Assemblymember,Democratic,matrix_member,,123089,2025-01-03,,
+George Whitesides,Majority Democrats,Congressman,Democratic,matrix_member,,1027555,2025-01-03,,
+Matt Mahan,Majority Democrats,Mayor of San Jose,Democratic,matrix_member,,9267070,2025-01-03,,
+Joe Neguse,Majority Democrats,Congressman,Democratic,matrix_member,,117088,2025-01-03,,
+Michael Bennet,Majority Democrats,US Senator and Candidate for Governor,Democratic,matrix_member,,1031622,2025-01-03,,
+Mike Johnston,Majority Democrats,Mayor of Denver,Democratic,matrix_member,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Sarah McBride,Majority Democrats,Congresswoman,Democratic,matrix_member,,103662,2025-01-03,,
+Eileen Higgins,Majority Democrats,Mayor of Miami,Democratic,matrix_member,,140188,2025-01-03,,
+Phil Olaleye,Majority Democrats,State Representative,Democratic,matrix_member,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Lauren McLean,Majority Democrats,Mayor of Boise,Democratic,matrix_member,,127201,2025-01-03,,
+Jared Golden,Majority Democrats,Congressman,Democratic,matrix_member,,116617,2025-01-03,,
+Jake Auchincloss,Majority Democrats,Congressman,Democratic,matrix_member,,127594,2025-01-03,,
+Elissa Slotkin,Majority Democrats,US Senator,Democratic,matrix_member,,76002,2025-01-03,,
+Kristen McDonald Rivet,Majority Democrats,Congresswoman,Democratic,matrix_member,,142296,2025-01-03,,
+Angie Craig,Majority Democrats,Congresswoman,Democratic,matrix_member,,104056,2025-01-03,,
+Grant Hauschild,Majority Democrats,Senator,Democratic,matrix_member,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Quinton Lucas,Majority Democrats,Mayor of Kansas City,Democratic,matrix_member,,111748,2025-01-03,,
+Sandra Jauregui,Majority Democrats,Majority Leader of the State Assembly,Democratic,matrix_member,,148673,2025-01-03,,
+Maggie Goodlander,Majority Democrats,Congresswoman,Democratic,matrix_member,,142492,2025-01-03,,
+Mikie Sherrill,Majority Democrats,Governor,Democratic,matrix_member,,116128,2025-01-03,,
+Gabe Vasquez,Majority Democrats,Congressman,Democratic,matrix_member,,9279005,2025-01-03,,
+Josh Riley,Majority Democrats,Congressman,Democratic,matrix_member,,142153,2025-01-03,,
+Pat Ryan,Majority Democrats,Congressman,Democratic,matrix_member,,86316,2025-01-03,,
+Ritchie Torres,Majority Democrats,Congressman,Democratic,matrix_member,,125371,2025-01-03,,
+Jeff Jackson,Majority Democrats,Attorney General,Democratic,matrix_member,,9279016,2025-01-03,,
+Zeb Smathers,Majority Democrats,Mayor of Canton,Democratic,matrix_member,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Aftab Pureval,Majority Democrats,Mayor of Cincinnati,Democratic,matrix_member,,116340,2025-01-03,,
+Justin Bibb,Majority Democrats,Mayor of Cleveland,Democratic,matrix_member,,9274112,2025-01-03,,
+Janelle Bynum,Majority Democrats,Congresswoman,Democratic,matrix_member,,142133,2025-01-03,,
+Austin Davis,Majority Democrats,Lt. Governor,Democratic,matrix_member,,134620,2025-01-03,,
+Brendan Boyle,Majority Democrats,Congressman,Democratic,matrix_member,,76428,2025-01-03,,
+Paige Cognetti,Majority Democrats,Mayor of Scranton,Democratic,matrix_member,,131492,2025-01-03,,
+James Talarico,Majority Democrats,State Representative,Democratic,matrix_member,,118217,2025-01-03,,Also listed in The Bench.
+Ron Nirenberg,Majority Democrats,Mayor of San Antonio,Democratic,matrix_member,,118545,2025-01-03,,
+Abigail Spanberger,Majority Democrats,Governor,Democratic,matrix_member,,116283,2025-01-03,,
+Don Scott,Majority Democrats,Speaker of the House of Delegates,Democratic,matrix_member,,139076,2025-01-03,,
+Phillip Jones,Majority Democrats,Mayor of Newport News,Democratic,matrix_member,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Marie Gluesenkamp Perez,Majority Democrats,Congresswoman,Democratic,matrix_member,,9279028,2025-01-03,,
+Kayla Young,Majority Democrats,Delegate,Democratic,matrix_member,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Cavalier Johnson,Majority Democrats,Mayor of Milwaukee,Democratic,matrix_member,,134519,2025-01-03,,
+Johnny Garcia,The Bench,TX-35,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Jason Esteves,The Bench,Georgia,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Marlene Galán-Woods,The Bench,AZ-01,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Mary Peltola,The Bench,Alaska,Democratic candidate,bench_candidate,,134189,2025-01-03,,
+Luke Bronin,The Bench,CT-01,Democratic candidate,bench_candidate,,63784,2025-01-03,,
+Nancy Lacore,The Bench,SC-01,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Shannon Bird,The Bench,CO-08,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Sam Forstag,The Bench,MT-01,Democratic candidate,bench_candidate,,148841,2025-01-03,,
+Denise Powell,The Bench,NE-02,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Bobby Pulido,The Bench,TX-15,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Josh Turek,The Bench,Iowa,Democratic candidate,bench_candidate,,148613,2025-01-03,,
+Mallory McMorrow,The Bench,Michigan,Democratic candidate,bench_candidate,,134323,2025-01-03,,
+Matt Maasdam,The Bench,MI-07,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Mike Cortese,The Bench,TN-04,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Darren McAuley,The Bench,FL-12,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Sarah Trone Garriott,The Bench,IA-03,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Cait Conley,The Bench,NY-17,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Bob Brooks,The Bench,PA-07,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Jamie Ager,The Bench,NC-11,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Chuck Schumer,External Democrats,Senate Minority Leader,Democratic,external_figure,Charles Schumer,,2025-01-03,,Needs C-SPAN person lookup.
+Donald Trump,Trump Administration,President,Republican,external_figure,President Trump,,2025-01-03,,Needs C-SPAN person lookup.
+Hakeem Jeffries,External Democrats,House Minority Leader,Democratic,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+JD Vance,Trump Administration,Vice President,Republican,external_figure,J.D. Vance,,2025-01-03,,Needs C-SPAN person lookup.
+Joel Valdez,Other,Public figure / staff,Unknown,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+John Thune,Republican Leadership,Senate Majority Leader,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Karoline Leavitt,Trump Administration,White House Press Secretary,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Marco Rubio,Trump Administration,Secretary of State,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Mike Johnson,Republican Leadership,Speaker of the House,Republican,external_figure,Speaker Johnson,,2025-01-03,,Needs C-SPAN person lookup.
+Pete Hegseth,Trump Administration,Secretary of Defense,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Scott Bessent,Trump Administration,Treasury Secretary,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Steven Cheung,Trump Administration,White House Communications Director,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Todd Blanche,Trump Administration,Deputy Attorney General,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.

@@ -91,6 +91,37 @@ UPDATE_INDEX_SUMMARY_FIELDNAMES = [
     "notes",
 ]
 
+TRACKED_PEOPLE_FIELDNAMES = [
+    "name",
+    "group",
+    "role",
+    "party_or_affiliation",
+    "person_type",
+    "aliases",
+    "cspan_person_id",
+    "active_from",
+    "active_to",
+    "notes",
+]
+
+ARCHIVE_COMPLETENESS_FIELDNAMES = [
+    "person_name",
+    "group",
+    "role",
+    "person_type",
+    "cspan_person_id",
+    "catalog_rows_since",
+    "seen_rows_since",
+    "priority_rows_since",
+    "browser_rows_since",
+    "earliest_local_row",
+    "latest_local_row",
+    "program_id_rows",
+    "blank_program_id_rows",
+    "duplicate_member_program_groups",
+    "warnings",
+]
+
 
 PRIORITY_CATALOG_FIELDNAMES = [
     "member_name",
@@ -283,13 +314,27 @@ def load_optional_csv_rows(input_path: Path) -> list[dict[str, str]]:
 
 
 def usable_people_rows(people_rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    return [
-        row
-        for row in people_rows
-        if row.get("matched", "").lower() == "yes"
-        and row.get("match_rank", "") in ("", "1")
-        and row.get("cspan_person_id", "").strip()
-    ]
+    usable_rows: list[dict[str, str]] = []
+    for row in people_rows:
+        cspan_person_id = row.get("cspan_person_id", "").strip()
+        if not cspan_person_id:
+            continue
+
+        matched = row.get("matched", "").lower()
+        match_rank = row.get("match_rank", "")
+        is_lookup_row = "matched" in row or "match_rank" in row
+        if is_lookup_row and not (matched == "yes" and match_rank in ("", "1")):
+            continue
+
+        normalized_row = dict(row)
+        if not normalized_row.get("display_name", "").strip():
+            normalized_row["display_name"] = normalized_row.get("name", "").strip()
+        if not normalized_row.get("input_first", "").strip() and normalized_row.get("first", "").strip():
+            normalized_row["input_first"] = normalized_row.get("first", "").strip()
+        if not normalized_row.get("input_last", "").strip() and normalized_row.get("last", "").strip():
+            normalized_row["input_last"] = normalized_row.get("last", "").strip()
+        usable_rows.append(normalized_row)
+    return usable_rows
 
 
 def program_key_for_row(row: dict[str, Any]) -> str:
@@ -503,6 +548,8 @@ def build_update_index_resume_command(
 
     if getattr(args, "sort", "date desc") != "date desc":
         command_parts.extend(["--sort", str(args.sort)])
+    if getattr(args, "since", ""):
+        command_parts.extend(["--since", str(args.since)])
     if getattr(args, "dry_run", False):
         command_parts.append("--dry-run")
 
@@ -1103,9 +1150,18 @@ def cmd_people_lookup(args: argparse.Namespace) -> int:
     raw_results: dict[str, Any] = {}
 
     for member in members:
-        first = member.get("first", "")
-        last = member.get("last", "")
-        display_name = member.get("display_name", "") or f"{first} {last}".strip()
+        first = member.get("first", "").strip() or member.get("input_first", "").strip()
+        last = member.get("last", "").strip() or member.get("input_last", "").strip()
+        display_name = (
+            member.get("display_name", "").strip()
+            or member.get("name", "").strip()
+            or f"{first} {last}".strip()
+        )
+        if display_name and not first and not last:
+            name_parts = display_name.split()
+            if len(name_parts) >= 2:
+                first = name_parts[0]
+                last = " ".join(name_parts[1:])
 
         if not first and not last and not display_name:
             continue
@@ -1637,6 +1693,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
 
     max_pages_per_member = max(1, int(args.max_pages_per_member))
     sleep_seconds = max(0.0, float(args.sleep_seconds))
+    since = getattr(args, "since", "").strip()
 
     seen_rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for row in existing_seen_rows:
@@ -1738,6 +1795,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
             rows_seen += len(programs)
             print(f"  Page {page}: {len(programs)} programs")
 
+            page_has_row_on_or_after_since = False
             for program in programs:
                 row = build_catalog_row(
                     member_name=member_name,
@@ -1751,6 +1809,13 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                     raw_detail_json_path="",
                 )
                 row["source_run"] = source_run
+                event_date = row.get("event_date", "")[:10]
+                if since and event_date:
+                    if event_date < since:
+                        continue
+                    page_has_row_on_or_after_since = True
+                elif since and not event_date:
+                    page_has_row_on_or_after_since = True
 
                 key = member_program_key(row)
                 if key in seen_rows_by_key:
@@ -1776,6 +1841,8 @@ def cmd_update_index(args: argparse.Namespace) -> int:
 
             cursor = get_cursor(data)
             if not cursor or not programs:
+                break
+            if since and programs and not page_has_row_on_or_after_since:
                 break
 
             page += 1
@@ -2405,6 +2472,155 @@ def cmd_audit_member_topic(args: argparse.Namespace) -> int:
     return 0
 
 
+def load_tracked_people(input_path: Path) -> list[dict[str, str]]:
+    tracked_rows = load_optional_csv_rows(input_path)
+    people: list[dict[str, str]] = []
+    seen_names: set[str] = set()
+    for row in tracked_rows:
+        name = row.get("name", "").strip() or row.get("display_name", "").strip()
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        normalized_row = {field: row.get(field, "").strip() for field in TRACKED_PEOPLE_FIELDNAMES}
+        normalized_row["name"] = name
+        people.append(normalized_row)
+    return people
+
+
+def row_date_since(row: dict[str, Any], since: str) -> bool:
+    if not since:
+        return True
+    event_date = row_event_date(row)[:10]
+    return bool(event_date and event_date >= since)
+
+
+def rows_for_person_since(
+    rows: list[dict[str, Any]],
+    person_name: str,
+    since: str,
+) -> list[dict[str, Any]]:
+    person_key = person_name.strip().lower()
+    return [
+        row for row in rows
+        if row_member_name(row).strip().lower() == person_key
+        and row_date_since(row, since)
+    ]
+
+
+def program_id_stats(rows: list[dict[str, Any]]) -> tuple[int, int]:
+    program_id_rows = sum(1 for row in rows if row.get("program_id", "").strip())
+    return program_id_rows, len(rows) - program_id_rows
+
+
+def archive_completeness_warnings(
+    person: dict[str, str],
+    catalog_rows: list[dict[str, Any]],
+    seen_rows: list[dict[str, Any]],
+    duplicate_group_count: int,
+) -> str:
+    warnings: list[str] = []
+    if not person.get("cspan_person_id", "").strip():
+        warnings.append("missing_cspan_person_id")
+    if not catalog_rows:
+        warnings.append("zero_catalog_rows_since")
+    elif len(catalog_rows) < 3:
+        warnings.append("low_catalog_rows_since")
+    if len(seen_rows) < len(catalog_rows):
+        warnings.append("seen_ledger_below_catalog")
+    if duplicate_group_count:
+        warnings.append(f"duplicate_member_program_groups={duplicate_group_count}")
+    if any(not row.get("program_id", "").strip() for row in catalog_rows):
+        warnings.append("blank_program_ids")
+    return "; ".join(warnings)
+
+
+def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
+    since = args.since.strip() or "2025-01-03"
+    tracked_people = load_tracked_people(Path(args.tracked_people))
+    catalog_rows = load_optional_csv_rows(Path(args.catalog))
+    seen_rows = load_optional_csv_rows(Path(args.seen))
+    priority_rows = load_optional_csv_rows(Path(args.priority_leads))
+    browser_rows = load_optional_csv_rows(Path(args.browser_source))
+
+    audit_rows: list[dict[str, Any]] = []
+    for person in tracked_people:
+        name = person.get("name", "")
+        person_catalog_rows = rows_for_person_since(catalog_rows, name, since)
+        person_seen_rows = rows_for_person_since(seen_rows, name, since)
+        person_priority_rows = rows_for_person_since(priority_rows, name, since)
+        person_browser_rows = rows_for_person_since(browser_rows, name, since)
+        event_dates = sorted(
+            row_event_date(row)[:10]
+            for row in person_catalog_rows
+            if row_event_date(row)
+        )
+        program_id_rows, blank_program_id_rows = program_id_stats(person_catalog_rows)
+        duplicate_groups = [
+            key for key, count in duplicate_member_program_counts(person_catalog_rows).items()
+            if count > 1
+        ]
+        warnings = archive_completeness_warnings(
+            person=person,
+            catalog_rows=person_catalog_rows,
+            seen_rows=person_seen_rows,
+            duplicate_group_count=len(duplicate_groups),
+        )
+
+        audit_rows.append(
+            {
+                "person_name": name,
+                "group": person.get("group", ""),
+                "role": person.get("role", ""),
+                "person_type": person.get("person_type", ""),
+                "cspan_person_id": person.get("cspan_person_id", ""),
+                "catalog_rows_since": len(person_catalog_rows),
+                "seen_rows_since": len(person_seen_rows),
+                "priority_rows_since": len(person_priority_rows),
+                "browser_rows_since": len(person_browser_rows),
+                "earliest_local_row": event_dates[0] if event_dates else "",
+                "latest_local_row": event_dates[-1] if event_dates else "",
+                "program_id_rows": program_id_rows,
+                "blank_program_id_rows": blank_program_id_rows,
+                "duplicate_member_program_groups": len(duplicate_groups),
+                "warnings": warnings,
+            }
+        )
+
+    output_path = Path(args.output)
+    write_csv_rows(output_path, audit_rows, ARCHIVE_COMPLETENESS_FIELDNAMES)
+
+    people_with_catalog_rows = sum(1 for row in audit_rows if int(row["catalog_rows_since"]) > 0)
+    missing_ids = sum(1 for row in audit_rows if not row["cspan_person_id"])
+    zero_catalog_rows = sum(1 for row in audit_rows if int(row["catalog_rows_since"]) == 0)
+    duplicate_groups_total = sum(int(row["duplicate_member_program_groups"]) for row in audit_rows)
+
+    print("Archive completeness audit")
+    print(f"Since: {since}")
+    print(f"Tracked people: {len(audit_rows)}")
+    print(f"People with local catalog rows: {people_with_catalog_rows}")
+    print(f"People missing C-SPAN person IDs: {missing_ids}")
+    print(f"People with zero catalog rows since date: {zero_catalog_rows}")
+    print(f"Duplicate member/person + program groups: {duplicate_groups_total}")
+    print(f"Catalog: {args.catalog}")
+    print(f"Seen ledger: {args.seen}")
+    print(f"Priority leads: {args.priority_leads}")
+    print(f"Browser source: {args.browser_source}")
+    print(f"Saved audit CSV to: {output_path}")
+    print("")
+    print("Rows by person:")
+    for row in audit_rows:
+        warning_text = row["warnings"] or "ok"
+        print(
+            f"- {row['person_name']} | {row['group']} | "
+            f"catalog={row['catalog_rows_since']} seen={row['seen_rows_since']} "
+            f"priority={row['priority_rows_since']} browser={row['browser_rows_since']} "
+            f"range={row['earliest_local_row'] or 'n/a'}..{row['latest_local_row'] or 'n/a'} "
+            f"program_ids={row['program_id_rows']}/{row['catalog_rows_since']} | {warning_text}"
+        )
+
+    return 0
+
+
 def cmd_audit_topic_aliases(args: argparse.Namespace) -> int:
     priorities_path = Path(args.priorities)
     aliases_path = Path(args.aliases)
@@ -2557,6 +2773,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_index_parser.add_argument("--start-member-index", default=1, type=int, help="Start at this 1-based usable matched member index.")
     update_index_parser.add_argument("--limit-members", default=0, type=int, help="Only process N matched people. Use 0 for no limit.")
     update_index_parser.add_argument("--sleep-seconds", default=1.0, type=float, help="Sleep this many seconds between member searches.")
+    update_index_parser.add_argument("--since", default="", help="Only add programs on or after this YYYY-MM-DD date.")
     update_index_parser.add_argument("--dry-run", action="store_true", help="Search and write output-new/summary without writing catalog or seen ledger.")
     update_index_parser.set_defaults(func=cmd_update_index)
 
@@ -2633,6 +2850,19 @@ def build_parser() -> argparse.ArgumentParser:
     audit_alias_parser.add_argument("--priorities", default="data/member_priorities.csv", help="Matrix priorities CSV.")
     audit_alias_parser.add_argument("--aliases", default=str(TOPIC_ALIASES_CSV), help="Topic aliases CSV.")
     audit_alias_parser.set_defaults(func=cmd_audit_topic_aliases)
+
+    audit_archive_parser = subparsers.add_parser(
+        "audit-archive-completeness",
+        help="Audit tracked-person archive coverage from a target date.",
+    )
+    audit_archive_parser.add_argument("--since", default="2025-01-03", help="Only count rows on or after this YYYY-MM-DD date.")
+    audit_archive_parser.add_argument("--tracked-people", default="data/tracked_people.csv", help="Tracked people metadata CSV.")
+    audit_archive_parser.add_argument("--catalog", default="output/cspan_member_programs_all.csv", help="Master catalog CSV.")
+    audit_archive_parser.add_argument("--seen", default="output/cspan_seen_programs.csv", help="Seen ledger CSV.")
+    audit_archive_parser.add_argument("--priority-leads", default="output/cspan_priority_leads_new_programs_md_depth3_merged.csv", help="Priority lead/export CSV to compare.")
+    audit_archive_parser.add_argument("--browser-source", default="output/cspan_member_programs_all.csv", help="CSV source representing what the browser can show.")
+    audit_archive_parser.add_argument("--output", default="output/cspan_archive_completeness_audit.csv", help="Output audit CSV path.")
+    audit_archive_parser.set_defaults(func=cmd_audit_archive_completeness)
 
     return parser
 

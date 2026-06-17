@@ -33,6 +33,7 @@ PRIORITY_COLUMNS = ["matrix_priority", "priority"]
 TOPIC_COLUMNS = [*PRIORITY_COLUMNS, *KEYWORD_COLUMNS]
 MEMBER_PRIORITIES_CSV = Path("data/member_priorities.csv")
 TOPIC_ALIASES_CSV = Path("data/topic_aliases.csv")
+TRACKED_PEOPLE_CSV = Path("data/tracked_people.csv")
 
 FILTER_SPECS = [
     ("keyword", "Keyword / topic", TOPIC_COLUMNS),
@@ -128,7 +129,7 @@ def create_app() -> Flask:
             total_rows=len(rows),
             visible_count=len(visible_rows),
             fieldnames=fieldnames,
-            member_values=unique_values(rows, MEMBER_COLUMNS),
+            member_values=member_person_values(rows),
             filter_specs=available_filter_specs(fieldnames),
             filter_options=filter_options(rows, fieldnames, member_filter),
             selected_filters=selected_filters,
@@ -152,6 +153,8 @@ def create_app() -> Flask:
             error=error,
             alias_note=alias_note,
             card_value=card_value,
+            person_group_label=person_group_label,
+            person_has_matrix_topics=person_has_matrix_topics,
             topic_aliases=topic_aliases,
             active_term_toggle_url=active_term_toggle_url,
             context_helper_text=context_helper_text,
@@ -343,6 +346,38 @@ def matrix_priority_rows() -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         return [{key: (value or "").strip() for key, value in row.items()} for row in reader]
+
+
+def tracked_people_rows() -> list[dict[str, str]]:
+    path = REPO_ROOT / TRACKED_PEOPLE_CSV
+    if not path.exists():
+        return []
+
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        return [{key: (value or "").strip() for key, value in row.items()} for row in reader]
+
+
+def tracked_people_by_name() -> dict[str, dict[str, str]]:
+    return {
+        row.get("name", "").strip(): row
+        for row in tracked_people_rows()
+        if row.get("name", "").strip()
+    }
+
+
+def member_person_values(rows: list[dict[str, str]]) -> list[str]:
+    values = set(unique_values(rows, MEMBER_COLUMNS))
+    values.update(tracked_people_by_name())
+    return sorted(values, key=str.lower)
+
+
+def person_group_label(name: str) -> str:
+    return tracked_people_by_name().get(name, {}).get("group", "")
+
+
+def person_has_matrix_topics(name: str) -> bool:
+    return bool(matrix_topics_for_member(name))
 
 
 def matrix_topics_for_member(member_filter: str) -> list[str]:
@@ -1486,9 +1521,9 @@ TEMPLATE = """
               <div class="source-path">{{ csv_path }}</div>
             </div>
             <div>
-              <label for="member">Member</label>
+              <label for="member">Member / Person</label>
               <select id="member" name="member" data-autosubmit>
-                <option value="">All Members</option>
+                <option value="">All Members / People</option>
                 {% for member in member_values %}
                   <option value="{{ member }}" {% if member == member_filter %}selected{% endif %}>{{ member }}</option>
                 {% endfor %}
@@ -1582,6 +1617,8 @@ TEMPLATE = """
               <p class="context-subtitle">
                 {% if selected_topic %}
                   {{ context_helper_text(selected_topic, active_terms, active_terms_are_narrowed) }}
+                {% elif member_filter and not person_has_matrix_topics(member_filter) %}
+                  <strong>{{ member_filter }}</strong> is in the broader people archive but is not part of the issue matrix. Topic filtering may be limited until local catalog rows exist.
                 {% elif member_filter %}
                   Matrix topics available for <strong>{{ member_filter }}</strong>.
                 {% else %}
@@ -1602,6 +1639,7 @@ TEMPLATE = """
                 >{{ term }}</a>
               {% endfor %}
             {% elif member_filter %}
+              {% if person_group_label(member_filter) %}<span class="chip">{{ person_group_label(member_filter) }}</span>{% endif %}
               {% for topic in filter_options.get("keyword", [])[:18] %}
                 <span class="chip soft">{{ topic }}</span>
               {% endfor %}
@@ -1646,6 +1684,7 @@ TEMPLATE = """
                         <div class="meta-line">
                           {% if card_value(row, "score") %}<span class="fact">Score {{ card_value(row, "score") }}</span>{% endif %}
                           {% if card_value(row, "matrix_priority") %}<span class="fact">{{ card_value(row, "matrix_priority") }}</span>{% endif %}
+                          {% if person_group_label(card_value(row, "member")) %}<span class="fact">{{ person_group_label(card_value(row, "member")) }}</span>{% endif %}
                         </div>
                         {% if card_value(row, "keywords") %}
                           <div class="matched-line"><strong>Matched:</strong> {{ card_value(row, "keywords") }}</div>
