@@ -803,11 +803,24 @@ def append_stem_suffix(path_value: str, suffix: str) -> str:
     return f"{path_value}{suffix}"
 
 
+def quote_windows_cmd_arg(value: Any) -> str:
+    text = str(value)
+    if text == "":
+        return '""'
+    if any(char.isspace() for char in text) or "," in text or "&" in text or "|" in text or "(" in text or ")" in text:
+        return f'"{text.replace(chr(34), chr(34) + chr(34))}"'
+    return text
+
+
 def build_update_index_resume_command(
     args: argparse.Namespace,
     resume_start_member_index: int,
     failed_because_rate_limit: bool,
     selected_member_count: int,
+    failed_selected_offset: int = 0,
+    failed_page: int = 1,
+    failed_cursor: str = "",
+    selected_people_rows: list[dict[str, str]] | None = None,
 ) -> str:
     original_start_member_index = max(1, int(args.start_member_index))
     original_limit_members = max(0, int(args.limit_members))
@@ -821,12 +834,18 @@ def build_update_index_resume_command(
         resume_limit_members = min(resume_limit_members, selected_member_count)
 
     sleep_seconds = max(float(args.sleep_seconds), 2.0) if failed_because_rate_limit else float(args.sleep_seconds)
+    lookup_flag = getattr(args, "lookup_source_flag", "--lookup")
+    only_people_value = getattr(args, "only_people", "").strip()
+    if only_people_value and selected_people_rows is not None:
+        remaining_rows = selected_people_rows[max(0, failed_selected_offset) :]
+        only_people_value = ",".join(person_display_name(row) for row in remaining_rows)
+
     command_parts = [
         "python",
         "-m",
         "md_cspan.cli",
         "update-index",
-        "--lookup",
+        lookup_flag,
         str(args.lookup),
         "--catalog",
         str(args.catalog),
@@ -840,12 +859,23 @@ def build_update_index_resume_command(
         str(args.max_pages_per_member),
         "--sleep-seconds",
         f"{sleep_seconds:g}",
-        "--start-member-index",
-        str(resume_start_member_index),
-        "--limit-members",
-        str(resume_limit_members),
     ]
 
+    if only_people_value:
+        command_parts.extend(["--only-people", only_people_value])
+    else:
+        command_parts.extend(
+            [
+                "--start-member-index",
+                str(resume_start_member_index),
+                "--limit-members",
+                str(resume_limit_members),
+            ]
+        )
+    if failed_page > 1:
+        command_parts.extend(["--start-page", str(failed_page)])
+    if failed_cursor:
+        command_parts.extend(["--start-cursor", failed_cursor])
     if getattr(args, "sort", "date desc") != "date desc":
         command_parts.extend(["--sort", str(args.sort)])
     if getattr(args, "since", ""):
@@ -853,7 +883,7 @@ def build_update_index_resume_command(
     if getattr(args, "dry_run", False):
         command_parts.append("--dry-run")
 
-    return " ".join(command_parts)
+    return " ".join(quote_windows_cmd_arg(part) for part in command_parts)
 
 
 def parse_keyword_terms(value: str) -> list[str]:
@@ -2009,6 +2039,16 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     run_started_at = utc_timestamp()
     source_run = run_started_at
 
+    people_path_arg = getattr(args, "people", "")
+    lookup_path_arg = getattr(args, "lookup", "")
+    if people_path_arg and lookup_path_arg:
+        raise ValueError("Use either --lookup or --people, not both.")
+    if people_path_arg:
+        args.lookup = people_path_arg
+        args.lookup_source_flag = "--people"
+    else:
+        args.lookup_source_flag = "--lookup"
+
     if not getattr(args, "lookup", ""):
         raise ValueError("Provide --lookup or --people.")
 
@@ -2043,6 +2083,10 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     max_pages_per_member = max(1, int(args.max_pages_per_member))
     sleep_seconds = max(0.0, float(args.sleep_seconds))
     since = getattr(args, "since", "").strip()
+    start_page = max(1, int(getattr(args, "start_page", 1)))
+    start_cursor = getattr(args, "start_cursor", "").strip()
+    if start_page > 1 and not start_cursor:
+        raise ValueError("--start-page greater than 1 requires --start-cursor from a suggested resume command.")
 
     seen_rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for row in existing_seen_rows:
@@ -2100,8 +2144,12 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         last_started_member_name = member_name
 
         member_slug = slugify(member_name)
-        cursor = ""
-        page = 1
+        if selected_offset == 0:
+            cursor = start_cursor
+            page = start_page
+        else:
+            cursor = ""
+            page = 1
         member_failed = False
         member_new_rows = 0
         member_existing_rows = 0
@@ -2140,12 +2188,17 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                     resume_start_member_index=current_member_index,
                     failed_because_rate_limit=is_rate_limit_error(exc),
                     selected_member_count=len(selected_people_rows),
+                    failed_selected_offset=selected_offset,
+                    failed_page=page,
+                    failed_cursor=cursor,
+                    selected_people_rows=selected_people_rows,
                 )
                 if is_rate_limit_error(exc):
                     rate_limited = "yes"
                     print("Rate limit hit; stopping update-index cleanly.")
                     print(f"Rate limited at member index {current_member_index}: {member_name}")
                     print(f"Suggested resume start index: {current_member_index}")
+                    print(f"Suggested resume start page: {page}")
                     print("Suggested resume command:")
                     print(suggested_resume_command)
                     break
@@ -2370,6 +2423,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     if requested_people_names:
         print(f"Only people: {', '.join(requested_people_names)}")
     print(f"Start member index: {start_member_index}")
+    print(f"Start page: {start_page}")
     print(f"Limit members: {limit_members}")
     print(f"Members processed: {members_processed}")
     print(f"Rows seen/fetched: {rows_seen}")
@@ -2391,6 +2445,10 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         print(f"Failed member name: {failed_member_name}")
         print(f"Failed reason: {failed_reason}")
         print(f"Suggested resume start index: {suggested_resume_start_member_index}")
+        if "--start-page" in suggested_resume_command:
+            suggested_page_match = re.search(r"--start-page\s+(\d+)", suggested_resume_command)
+            if suggested_page_match:
+                print(f"Suggested resume start page: {suggested_page_match.group(1)}")
         print("Suggested resume command:")
         print(suggested_resume_command)
     if not args.dry_run:
@@ -3711,8 +3769,8 @@ def build_parser() -> argparse.ArgumentParser:
         "update-index",
         help="Update a persistent member/program C-SPAN discovery index.",
     )
-    update_index_parser.add_argument("--lookup", help="Reviewed people lookup CSV.")
-    update_index_parser.add_argument("--people", dest="lookup", default=argparse.SUPPRESS, help="Tracked people CSV. Alias for --lookup.")
+    update_index_parser.add_argument("--lookup", default="", help="Reviewed people lookup CSV.")
+    update_index_parser.add_argument("--people", default="", help="Tracked people CSV. Alias for --lookup.")
     update_index_parser.add_argument("--catalog", required=True, help="Persistent master catalog CSV.")
     update_index_parser.add_argument("--seen", required=True, help="Persistent seen-program ledger CSV.")
     update_index_parser.add_argument("--output-new", required=True, help="Output CSV containing only newly discovered rows.")
@@ -3720,6 +3778,8 @@ def build_parser() -> argparse.ArgumentParser:
     update_index_parser.add_argument("--sort", default="date desc", help="C-SPAN sort option. Example: date desc")
     update_index_parser.add_argument("--max-pages-per-member", default=1, type=int, help="Maximum paginated result pages per member.")
     update_index_parser.add_argument("--start-member-index", default=1, type=int, help="Start at this 1-based usable matched member index.")
+    update_index_parser.add_argument("--start-page", default=1, type=int, help="Start the first processed person at this 1-based C-SPAN result page. Use with --start-cursor from a suggested resume command.")
+    update_index_parser.add_argument("--start-cursor", default="", help="C-SPAN cursor for --start-page, normally copied from a suggested resume command.")
     update_index_parser.add_argument("--limit-members", default=0, type=int, help="Only process N matched people. Use 0 for no limit.")
     update_index_parser.add_argument("--limit-people", dest="limit_members", default=argparse.SUPPRESS, type=int, help="Alias for --limit-members.")
     update_index_parser.add_argument("--only-people", default="", help="Comma-separated exact person names to crawl, preserving input CSV order.")
