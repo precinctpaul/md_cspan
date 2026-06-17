@@ -131,6 +131,18 @@ TRACKED_PEOPLE_FIELDNAMES = [
     "notes",
 ]
 
+REVIEWED_NO_CSPAN_PROFILE_FIELDNAMES = [
+    "tracked_name",
+    "review_status",
+    "review_reason",
+    "reviewed_at",
+]
+
+NO_CSPAN_PROFILE_STATUSES = {
+    "no_cspan_profile_found",
+    "no_safe_match_found",
+}
+
 ARCHIVE_COMPLETENESS_FIELDNAMES = [
     "person_name",
     "group",
@@ -161,6 +173,8 @@ COVERAGE_EXCEPTIONS_FIELDNAMES = [
     "cspan_person_id",
     "coverage_status",
     "crawl_floor_status",
+    "reviewed_no_profile_status",
+    "reviewed_no_profile_reason",
     "catalog_rows",
     "seen_rows",
     "priority_rows",
@@ -3374,6 +3388,24 @@ def load_tracked_people(input_path: Path) -> list[dict[str, str]]:
     return people
 
 
+def load_reviewed_no_cspan_profiles(input_path: Path) -> dict[str, dict[str, str]]:
+    reviewed: dict[str, dict[str, str]] = {}
+    for row in load_optional_csv_rows(input_path):
+        tracked_name = row.get("tracked_name", "").strip()
+        review_status = row.get("review_status", "").strip()
+        if not tracked_name:
+            continue
+        if review_status and review_status not in NO_CSPAN_PROFILE_STATUSES:
+            continue
+        reviewed[tracked_name.lower()] = {
+            "tracked_name": tracked_name,
+            "review_status": review_status,
+            "review_reason": row.get("review_reason", "").strip(),
+            "reviewed_at": row.get("reviewed_at", "").strip(),
+        }
+    return reviewed
+
+
 def row_date_since(row: dict[str, Any], since: str) -> bool:
     if not since:
         return True
@@ -3544,6 +3576,7 @@ def build_archive_completeness_rows(
     priority_leads_path: Path,
     browser_source_path: Path,
     evidence_dir: Path,
+    reviewed_no_profile_path: Path | None = None,
     include_dry_run_evidence: bool = False,
 ) -> list[dict[str, Any]]:
     crawl_evidence_by_person = load_crawl_floor_evidence(
@@ -3555,6 +3588,11 @@ def build_archive_completeness_rows(
     seen_rows = load_optional_csv_rows(seen_path)
     priority_rows = load_optional_csv_rows(priority_leads_path)
     browser_rows = load_optional_csv_rows(browser_source_path)
+    reviewed_no_profiles = (
+        load_reviewed_no_cspan_profiles(reviewed_no_profile_path)
+        if reviewed_no_profile_path is not None
+        else {}
+    )
 
     audit_rows: list[dict[str, Any]] = []
     for person in tracked_people:
@@ -3582,6 +3620,7 @@ def build_archive_completeness_rows(
         crawl_floor_evidence = evidence_for_person(crawl_evidence_by_person, person)
         coverage_status = archive_coverage_status(person, person_catalog_rows, crawl_floor_evidence)
         floor_status = crawl_floor_status(person, person_catalog_rows, crawl_floor_evidence)
+        reviewed_no_profile = reviewed_no_profiles.get(name.strip().lower(), {})
 
         audit_rows.append(
             {
@@ -3593,6 +3632,9 @@ def build_archive_completeness_rows(
                 "cspan_person_id": person.get("cspan_person_id", ""),
                 "coverage_status": coverage_status,
                 "crawl_floor_status": floor_status,
+                "reviewed_no_profile_status": reviewed_no_profile.get("review_status", ""),
+                "reviewed_no_profile_reason": reviewed_no_profile.get("review_reason", ""),
+                "reviewed_no_profile_reviewed_at": reviewed_no_profile.get("reviewed_at", ""),
                 "crawl_floor_evidence": crawl_floor_evidence,
                 "catalog_rows_since": len(person_catalog_rows),
                 "seen_rows_since": len(person_seen_rows),
@@ -3621,6 +3663,7 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
         priority_leads_path=Path(args.priority_leads),
         browser_source_path=Path(args.browser_source),
         evidence_dir=output_path.parent,
+        reviewed_no_profile_path=Path(args.reviewed_no_profile),
         include_dry_run_evidence=args.include_dry_run_evidence,
     )
 
@@ -3677,7 +3720,10 @@ def coverage_exception_next_step(row: dict[str, Any]) -> str:
     coverage_status = str(row.get("coverage_status", ""))
     crawl_status = str(row.get("crawl_floor_status", ""))
     catalog_rows = int(row.get("catalog_rows_since", 0) or 0)
+    reviewed_status = str(row.get("reviewed_no_profile_status", "")).strip()
 
+    if reviewed_status:
+        return "Reviewed as no safe C-SPAN profile/match; no ID apply unless new evidence appears."
     if coverage_status == "needs_manual_cspan_id_review" and catalog_rows == 0:
         return "Run targeted C-SPAN person ID audit or mark as no C-SPAN profile if verified."
     if coverage_status == "has_id_low_local_rows" and crawl_status == "not_yet_proven":
@@ -3719,6 +3765,9 @@ def build_coverage_exception_row(row: dict[str, Any]) -> dict[str, Any]:
     warnings = str(row.get("warnings", "")).strip()
     if warnings:
         problem_parts.append(f"warnings={warnings}")
+    reviewed_status = str(row.get("reviewed_no_profile_status", "")).strip()
+    if reviewed_status:
+        problem_parts.append(f"reviewed_no_profile={reviewed_status}")
 
     return {
         "name": row.get("person_name", ""),
@@ -3729,6 +3778,8 @@ def build_coverage_exception_row(row: dict[str, Any]) -> dict[str, Any]:
         "cspan_person_id": row.get("cspan_person_id", ""),
         "coverage_status": row.get("coverage_status", ""),
         "crawl_floor_status": row.get("crawl_floor_status", ""),
+        "reviewed_no_profile_status": row.get("reviewed_no_profile_status", ""),
+        "reviewed_no_profile_reason": row.get("reviewed_no_profile_reason", ""),
         "catalog_rows": row.get("catalog_rows_since", 0),
         "seen_rows": row.get("seen_rows_since", 0),
         "priority_rows": row.get("priority_rows_since", 0),
@@ -3752,6 +3803,7 @@ def cmd_export_coverage_exceptions(args: argparse.Namespace) -> int:
         priority_leads_path=Path(args.priority_leads),
         browser_source_path=Path(args.browser_source),
         evidence_dir=output_path.parent,
+        reviewed_no_profile_path=Path(args.reviewed_no_profile),
         include_dry_run_evidence=args.include_dry_run_evidence,
     )
 
@@ -3763,6 +3815,7 @@ def cmd_export_coverage_exceptions(args: argparse.Namespace) -> int:
         build_coverage_exception_row(row)
         for row in audit_rows
         if row.get("coverage_status", "") in included_statuses
+        and not (args.exclude_reviewed_no_profile and row.get("reviewed_no_profile_status", ""))
     ]
     exception_rows.sort(
         key=lambda row: (
@@ -3793,6 +3846,81 @@ def cmd_export_coverage_exceptions(args: argparse.Namespace) -> int:
     for group, count in sorted(group_counts.items()):
         print(f"  {group}: {count}")
     print(f"Output path: {output_path}")
+    return 0
+
+
+def cmd_mark_no_cspan_profile(args: argparse.Namespace) -> int:
+    requested_names = parse_people_filter(args.only_people)
+    if not requested_names:
+        raise ValueError("--only-people is required.")
+
+    review_status = args.review_status.strip()
+    if review_status not in NO_CSPAN_PROFILE_STATUSES:
+        raise ValueError(
+            "--review-status must be one of: " + ", ".join(sorted(NO_CSPAN_PROFILE_STATUSES))
+        )
+    review_reason = args.review_reason.strip()
+    if not review_reason:
+        raise ValueError("--review-reason cannot be blank.")
+
+    tracked_people = load_tracked_people(Path(args.tracked_people))
+    tracked_names = {person.get("name", "") for person in tracked_people}
+    missing_names = [name for name in requested_names if name not in tracked_names]
+    if missing_names:
+        raise ValueError(
+            "Names passed to --only-people were not found in tracked_people.csv: "
+            + ", ".join(missing_names)
+        )
+
+    output_path = Path(args.output)
+    existing_rows = load_optional_csv_rows(output_path)
+    rows_by_name = {
+        row.get("tracked_name", "").strip(): {
+            "tracked_name": row.get("tracked_name", "").strip(),
+            "review_status": row.get("review_status", "").strip(),
+            "review_reason": row.get("review_reason", "").strip(),
+            "reviewed_at": row.get("reviewed_at", "").strip(),
+        }
+        for row in existing_rows
+        if row.get("tracked_name", "").strip()
+    }
+    existing_order = [
+        row.get("tracked_name", "").strip()
+        for row in existing_rows
+        if row.get("tracked_name", "").strip()
+    ]
+
+    reviewed_at = args.reviewed_at.strip() or utc_timestamp()[:10]
+    changed_names: list[str] = []
+    added_names: list[str] = []
+    for name in requested_names:
+        new_row = {
+            "tracked_name": name,
+            "review_status": review_status,
+            "review_reason": review_reason,
+            "reviewed_at": reviewed_at,
+        }
+        if name not in rows_by_name:
+            existing_order.append(name)
+            added_names.append(name)
+        elif rows_by_name[name] != new_row:
+            changed_names.append(name)
+        rows_by_name[name] = new_row
+
+    output_rows = [rows_by_name[name] for name in existing_order if name in rows_by_name]
+    write_csv_rows(output_path, output_rows, REVIEWED_NO_CSPAN_PROFILE_FIELDNAMES)
+
+    print("Reviewed no-C-SPAN-profile marks updated")
+    print(f"Output path: {output_path}")
+    print(f"Rows written: {len(output_rows)}")
+    print(f"Added rows: {len(added_names)}")
+    for name in added_names:
+        print(f"- added: {name}")
+    print(f"Updated rows: {len(changed_names)}")
+    for name in changed_names:
+        print(f"- updated: {name}")
+    print(f"Review status: {review_status}")
+    print(f"Reviewed at: {reviewed_at}")
     return 0
 
 
@@ -4074,6 +4202,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_archive_parser.add_argument("--seen", default="output/cspan_seen_programs.csv", help="Seen ledger CSV.")
     audit_archive_parser.add_argument("--priority-leads", default="output/cspan_priority_leads_new_programs_md_depth3_merged.csv", help="Priority lead/export CSV to compare.")
     audit_archive_parser.add_argument("--browser-source", default="output/cspan_member_programs_all.csv", help="CSV source representing what the browser can show.")
+    audit_archive_parser.add_argument("--reviewed-no-profile", default="data/reviewed_no_cspan_profile.csv", help="Reviewed no-C-SPAN-profile CSV.")
     audit_archive_parser.add_argument("--output", default="output/cspan_archive_completeness_audit.csv", help="Output audit CSV path.")
     audit_archive_parser.add_argument("--include-dry-run-evidence", action="store_true", help="Allow dry-run update summaries to count as crawl-floor evidence.")
     audit_archive_parser.set_defaults(func=cmd_audit_archive_completeness)
@@ -4088,10 +4217,24 @@ def build_parser() -> argparse.ArgumentParser:
     export_exceptions_parser.add_argument("--seen", default="output/cspan_seen_programs.csv", help="Seen ledger CSV.")
     export_exceptions_parser.add_argument("--priority-leads", default="output/cspan_priority_leads_new_programs_md_depth3_merged.csv", help="Priority lead/export CSV to compare.")
     export_exceptions_parser.add_argument("--browser-source", default="output/cspan_member_programs_all.csv", help="CSV source representing what the browser can show.")
+    export_exceptions_parser.add_argument("--reviewed-no-profile", default="data/reviewed_no_cspan_profile.csv", help="Reviewed no-C-SPAN-profile CSV.")
     export_exceptions_parser.add_argument("--output", default="output/cspan_coverage_exceptions.csv", help="Output coverage exceptions CSV path.")
     export_exceptions_parser.add_argument("--include-zero-current-congress", action="store_true", help="Also include people with proven no current-Congress rows.")
+    export_exceptions_parser.add_argument("--exclude-reviewed-no-profile", action="store_true", help="Exclude people already marked as reviewed no profile/no safe match.")
     export_exceptions_parser.add_argument("--include-dry-run-evidence", action="store_true", help="Allow dry-run update summaries to count as crawl-floor evidence.")
     export_exceptions_parser.set_defaults(func=cmd_export_coverage_exceptions)
+
+    mark_no_profile_parser = subparsers.add_parser(
+        "mark-no-cspan-profile",
+        help="Create or update reviewed no-C-SPAN-profile marks for tracked people.",
+    )
+    mark_no_profile_parser.add_argument("--tracked-people", default="data/tracked_people.csv", help="Tracked people metadata CSV.")
+    mark_no_profile_parser.add_argument("--output", default="data/reviewed_no_cspan_profile.csv", help="Reviewed no-C-SPAN-profile CSV to write.")
+    mark_no_profile_parser.add_argument("--only-people", required=True, help="Comma-separated exact tracked person names to mark.")
+    mark_no_profile_parser.add_argument("--review-status", required=True, choices=sorted(NO_CSPAN_PROFILE_STATUSES), help="Reviewed no-profile status.")
+    mark_no_profile_parser.add_argument("--review-reason", required=True, help="Human review reason for the mark.")
+    mark_no_profile_parser.add_argument("--reviewed-at", default="", help="Review date or timestamp. Defaults to today's UTC date.")
+    mark_no_profile_parser.set_defaults(func=cmd_mark_no_cspan_profile)
 
     return parser
 
