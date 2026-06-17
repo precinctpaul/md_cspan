@@ -95,6 +95,10 @@ UPDATE_INDEX_SUMMARY_FIELDNAMES = [
     "already_seen",
     "skipped",
     "skip_reasons_summary",
+    "empty_page_reached",
+    "last_page_fetched",
+    "last_page_program_count",
+    "crawl_stop_reason",
     "notes",
 ]
 
@@ -1980,6 +1984,10 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         member_skipped_rows = 0
         member_skip_reason_counts: dict[str, int] = {}
         member_api_errors = 0
+        empty_page_reached = "no"
+        last_page_fetched = ""
+        last_page_program_count = ""
+        crawl_stop_reason = "completed"
 
         print(f"Updating index for {member_name} ({cspan_person_id})")
 
@@ -1997,6 +2005,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                 error_note = f"{member_name} page {page}: {exc}"
                 notes.append(error_note.replace("\n", " "))
                 member_failed = True
+                crawl_stop_reason = "rate_limited" if is_rate_limit_error(exc) else "api_error"
                 failed_member_index = str(current_member_index)
                 failed_member_name = member_name
                 failed_reason = "429 Too Many Requests" if is_rate_limit_error(exc) else str(exc).replace("\n", " ")
@@ -2025,6 +2034,8 @@ def cmd_update_index(args: argparse.Namespace) -> int:
             programs = normalize_programs_response(data)
             rows_seen += len(programs)
             member_programs_fetched += len(programs)
+            last_page_fetched = str(page)
+            last_page_program_count = str(len(programs))
             print(f"  Page {page}: {len(programs)} programs")
 
             page_has_row_on_or_after_since = False
@@ -2110,12 +2121,21 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                 }
 
             cursor = get_cursor(data)
-            if not cursor or not programs:
+            if not programs:
+                empty_page_reached = "yes"
+                crawl_stop_reason = "empty_page"
+                break
+            if not cursor:
+                crawl_stop_reason = "completed"
                 break
             if since and programs and not page_has_row_on_or_after_since:
+                crawl_stop_reason = "reached_since_floor"
                 break
 
             page += 1
+
+        if not member_failed and crawl_stop_reason == "completed" and page > max_pages_per_member:
+            crawl_stop_reason = "max_pages_reached"
 
         if not member_failed:
             last_completed_member_index = str(current_member_index)
@@ -2129,6 +2149,10 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                 "already_seen": member_existing_rows,
                 "skipped": member_skipped_rows,
                 "skip_reasons_summary": counts_summary(member_skip_reason_counts),
+                "empty_page_reached": empty_page_reached,
+                "last_page_fetched": last_page_fetched,
+                "last_page_program_count": last_page_program_count,
+                "crawl_stop_reason": crawl_stop_reason,
                 "api_errors": member_api_errors,
             }
         )
@@ -2139,6 +2163,9 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                 print(f"    {reason}: {count}")
         if member_api_errors:
             print(f"  API errors: {member_api_errors}")
+        print(f"  Empty page reached: {empty_page_reached}")
+        print(f"  Last page fetched: {last_page_fetched or 'n/a'}")
+        print(f"  Stop reason: {crawl_stop_reason}")
 
         if rate_limited == "yes":
             break
@@ -2199,6 +2226,10 @@ def cmd_update_index(args: argparse.Namespace) -> int:
             "already_seen": existing_row_count,
             "skipped": skipped_row_count,
             "skip_reasons_summary": counts_summary(skip_reason_totals),
+            "empty_page_reached": "",
+            "last_page_fetched": "",
+            "last_page_program_count": "",
+            "crawl_stop_reason": "",
         }
     ]
     for person_summary_row in person_summary_rows:
@@ -3060,6 +3091,22 @@ def load_crawl_floor_evidence(output_dir: Path) -> dict[tuple[str, str], str]:
             if not person_name and not cspan_person_id:
                 continue
             evidence = f"before_since_date skip found in {skipped_path}"
+            if person_name:
+                evidence_by_person.setdefault(("name", person_name.lower()), evidence)
+            if cspan_person_id:
+                evidence_by_person.setdefault(("id", cspan_person_id), evidence)
+
+    for summary_path in sorted(output_dir.glob("cspan_update_index_*_summary.csv")):
+        for row in load_optional_csv_rows(summary_path):
+            if row.get("person_name", "") == "(run total)":
+                continue
+            if row.get("empty_page_reached", "").lower() != "yes":
+                continue
+            person_name = row.get("person_name", "").strip()
+            cspan_person_id = row.get("cspan_person_id", "").strip()
+            if not person_name and not cspan_person_id:
+                continue
+            evidence = f"empty page reached in {summary_path}"
             if person_name:
                 evidence_by_person.setdefault(("name", person_name.lower()), evidence)
             if cspan_person_id:
