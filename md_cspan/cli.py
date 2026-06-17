@@ -132,6 +132,8 @@ ARCHIVE_COMPLETENESS_FIELDNAMES = [
     "person_type",
     "cspan_person_id",
     "coverage_status",
+    "crawl_floor_status",
+    "crawl_floor_evidence",
     "catalog_rows_since",
     "seen_rows_since",
     "priority_rows_since",
@@ -3047,8 +3049,54 @@ def archive_coverage_status(
     return "likely_complete_enough"
 
 
+def load_crawl_floor_evidence(output_dir: Path) -> dict[tuple[str, str], str]:
+    evidence_by_person: dict[tuple[str, str], str] = {}
+    for skipped_path in sorted(output_dir.glob("cspan_skipped_programs_*.csv")):
+        for row in load_optional_csv_rows(skipped_path):
+            if row.get("skip_reason", "") != "before_since_date":
+                continue
+            person_name = row.get("person_name", "").strip()
+            cspan_person_id = row.get("cspan_person_id", "").strip()
+            if not person_name and not cspan_person_id:
+                continue
+            evidence = f"before_since_date skip found in {skipped_path}"
+            if person_name:
+                evidence_by_person.setdefault(("name", person_name.lower()), evidence)
+            if cspan_person_id:
+                evidence_by_person.setdefault(("id", cspan_person_id), evidence)
+    return evidence_by_person
+
+
+def crawl_floor_status(
+    person: dict[str, str],
+    catalog_rows: list[dict[str, Any]],
+    crawl_floor_evidence: str,
+) -> str:
+    if not person.get("cspan_person_id", "").strip():
+        return "missing_cspan_person_id"
+    if not catalog_rows:
+        return "zero_current_congress_rows"
+    if crawl_floor_evidence:
+        return "reached_since_floor"
+    return "not_yet_proven"
+
+
+def evidence_for_person(
+    evidence_by_person: dict[tuple[str, str], str],
+    person: dict[str, str],
+) -> str:
+    cspan_person_id = person.get("cspan_person_id", "").strip()
+    if cspan_person_id:
+        evidence = evidence_by_person.get(("id", cspan_person_id), "")
+        if evidence:
+            return evidence
+    return evidence_by_person.get(("name", person.get("name", "").strip().lower()), "")
+
+
 def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
     since = args.since.strip() or "2025-01-03"
+    output_path = Path(args.output)
+    crawl_evidence_by_person = load_crawl_floor_evidence(output_path.parent)
     tracked_people = load_tracked_people(Path(args.tracked_people))
     catalog_rows = load_optional_csv_rows(Path(args.catalog))
     seen_rows = load_optional_csv_rows(Path(args.seen))
@@ -3079,6 +3127,8 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
             duplicate_group_count=len(duplicate_groups),
         )
         coverage_status = archive_coverage_status(person, person_catalog_rows)
+        crawl_floor_evidence = evidence_for_person(crawl_evidence_by_person, person)
+        floor_status = crawl_floor_status(person, person_catalog_rows, crawl_floor_evidence)
 
         audit_rows.append(
             {
@@ -3088,6 +3138,8 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
                 "person_type": person.get("person_type", ""),
                 "cspan_person_id": person.get("cspan_person_id", ""),
                 "coverage_status": coverage_status,
+                "crawl_floor_status": floor_status,
+                "crawl_floor_evidence": crawl_floor_evidence,
                 "catalog_rows_since": len(person_catalog_rows),
                 "seen_rows_since": len(person_seen_rows),
                 "priority_rows_since": len(person_priority_rows),
@@ -3101,7 +3153,6 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
             }
         )
 
-    output_path = Path(args.output)
     write_csv_rows(output_path, audit_rows, ARCHIVE_COMPLETENESS_FIELDNAMES)
 
     people_with_catalog_rows = sum(1 for row in audit_rows if int(row["catalog_rows_since"]) > 0)
@@ -3109,9 +3160,12 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
     zero_catalog_rows = sum(1 for row in audit_rows if int(row["catalog_rows_since"]) == 0)
     duplicate_groups_total = sum(int(row["duplicate_member_program_groups"]) for row in audit_rows)
     status_counts: dict[str, int] = {}
+    crawl_floor_status_counts: dict[str, int] = {}
     for row in audit_rows:
         status = str(row["coverage_status"])
         status_counts[status] = status_counts.get(status, 0) + 1
+        floor_status = str(row["crawl_floor_status"])
+        crawl_floor_status_counts[floor_status] = crawl_floor_status_counts.get(floor_status, 0) + 1
 
     print("Archive completeness audit")
     print(f"Since: {since}")
@@ -3122,6 +3176,9 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
     print(f"Duplicate member/person + program groups: {duplicate_groups_total}")
     print("Coverage status counts:")
     for status, count in sorted(status_counts.items()):
+        print(f"  {status}: {count}")
+    print("Crawl floor status counts:")
+    for status, count in sorted(crawl_floor_status_counts.items()):
         print(f"  {status}: {count}")
     print(f"Catalog: {args.catalog}")
     print(f"Seen ledger: {args.seen}")
@@ -3134,7 +3191,7 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
         warning_text = row["warnings"] or "ok"
         print(
             f"- {row['person_name']} | {row['group']} | "
-            f"status={row['coverage_status']} "
+            f"coverage={row['coverage_status']} crawl_floor={row['crawl_floor_status']} "
             f"catalog={row['catalog_rows_since']} seen={row['seen_rows_since']} "
             f"priority={row['priority_rows_since']} browser={row['browser_rows_since']} "
             f"range={row['earliest_local_row'] or 'n/a'}..{row['latest_local_row'] or 'n/a'} "
