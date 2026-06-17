@@ -6,6 +6,7 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from flask import Flask, render_template_string, request
 
@@ -74,6 +75,9 @@ def create_app() -> Flask:
             filter_id: request.args.get(filter_id, "").strip()
             for filter_id, _label, _columns in FILTER_SPECS
         }
+        selected_topic = selected_filters.get("keyword", "")
+        active_terms_param = request.args.get("active_terms")
+        active_terms = resolve_active_terms(selected_topic, active_terms_param)
 
         rows: list[dict[str, str]] = []
         fieldnames: list[str] = []
@@ -87,12 +91,13 @@ def create_app() -> Flask:
             sort_value = resolve_sort_value(sort_value, member_filter, sort_options)
             group_options = available_group_options(member_filter)
             group_by = resolve_group_by(requested_group_by, member_filter, group_options)
-            alias_note = alias_note_for_filter(rows, member_filter, selected_filters.get("keyword", ""))
+            alias_note = alias_note_for_filter(rows, member_filter, selected_topic, active_terms)
             visible_rows = filter_rows(
                 rows=rows,
                 query=query,
                 member_filter=member_filter,
                 selected_filters=selected_filters,
+                active_terms=active_terms,
                 date_from=date_from,
                 date_to=date_to,
                 min_priority_score=min_priority_score,
@@ -120,6 +125,10 @@ def create_app() -> Flask:
             filter_specs=available_filter_specs(fieldnames),
             filter_options=filter_options(rows, fieldnames, member_filter),
             selected_filters=selected_filters,
+            selected_topic=selected_topic,
+            related_terms=related_topic_terms(selected_topic),
+            active_terms=active_terms,
+            active_terms_value=active_terms_value(selected_topic, active_terms, active_terms_param),
             query=query,
             member_filter=member_filter,
             date_from=date_from,
@@ -135,6 +144,8 @@ def create_app() -> Flask:
             error=error,
             alias_note=alias_note,
             card_value=card_value,
+            topic_aliases=topic_aliases,
+            active_term_toggle_url=active_term_toggle_url,
             cell_text=cell_text,
             all_fields=all_fields,
         )
@@ -352,6 +363,67 @@ def topic_aliases(topic: str) -> list[str]:
     return deduped_terms
 
 
+def related_topic_terms(topic: str) -> list[str]:
+    topic_key = normalize_topic_key(topic)
+    return [
+        term for term in topic_aliases(topic)
+        if normalize_topic_key(term) != topic_key
+    ]
+
+
+def resolve_active_terms(topic: str, active_terms_param: str | None) -> list[str]:
+    related_terms = related_topic_terms(topic)
+    if not topic or active_terms_param is None:
+        return related_terms
+
+    requested_keys = {
+        normalize_topic_key(term)
+        for term in active_terms_param.split(",")
+        if term.strip()
+    }
+    return [
+        term for term in related_terms
+        if normalize_topic_key(term) in requested_keys
+    ]
+
+
+def active_terms_value(
+    topic: str,
+    active_terms: list[str],
+    active_terms_param: str | None,
+) -> str:
+    if not topic or active_terms_param is None:
+        return ""
+
+    return ",".join(active_terms)
+
+
+def active_term_toggle_url(term: str, selected_topic: str, active_terms: list[str]) -> str:
+    related_terms = related_topic_terms(selected_topic)
+    related_keys = [normalize_topic_key(related_term) for related_term in related_terms]
+    active_keys = {normalize_topic_key(active_term) for active_term in active_terms}
+    term_key = normalize_topic_key(term)
+
+    if term_key in active_keys:
+        active_keys.remove(term_key)
+    else:
+        active_keys.add(term_key)
+
+    next_active_terms = [
+        related_term for related_term, related_key in zip(related_terms, related_keys)
+        if related_key in active_keys
+    ]
+
+    args = request.args.to_dict(flat=True)
+    if len(next_active_terms) == len(related_terms):
+        args.pop("active_terms", None)
+    else:
+        args["active_terms"] = ",".join(next_active_terms)
+
+    query = urlencode(args)
+    return f"/?{query}" if query else "/"
+
+
 def split_alias_terms(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[;\n]+", value or "") if part.strip()]
 
@@ -479,7 +551,11 @@ def term_matches_text(term: str, text: str) -> bool:
     return re.search(rf"(?<!\w){escaped_term}(?!\w)", text, flags=re.IGNORECASE) is not None
 
 
-def row_matches_topic(row: dict[str, str], selected_value: str) -> bool:
+def row_matches_topic(
+    row: dict[str, str],
+    selected_value: str,
+    active_terms: list[str] | None = None,
+) -> bool:
     if not selected_value:
         return True
 
@@ -498,14 +574,20 @@ def row_matches_topic(row: dict[str, str], selected_value: str) -> bool:
             "event_type",
         ]
     )
-    return any(term_matches_text(term, searchable_text) for term in topic_aliases(selected_value))
+    alias_terms = topic_aliases(selected_value) if active_terms is None else [selected_value, *active_terms]
+    return any(term_matches_text(term, searchable_text) for term in alias_terms)
 
 
-def alias_note_for_filter(rows: list[dict[str, str]], member_filter: str, selected_topic: str) -> str:
+def alias_note_for_filter(
+    rows: list[dict[str, str]],
+    member_filter: str,
+    selected_topic: str,
+    active_terms: list[str] | None = None,
+) -> str:
     if not member_filter or not selected_topic:
         return ""
 
-    aliases = [term for term in topic_aliases(selected_topic) if term.lower() != selected_topic.lower()]
+    aliases = active_terms if active_terms is not None else related_topic_terms(selected_topic)
     if not aliases:
         return ""
 
@@ -513,7 +595,7 @@ def alias_note_for_filter(rows: list[dict[str, str]], member_filter: str, select
     exact_matches = [row for row in member_rows if selected_topic in values_for_columns(row, TOPIC_COLUMNS)]
     alias_matches = [
         row for row in member_rows
-        if row_matches_topic(row, selected_topic)
+        if row_matches_topic(row, selected_topic, active_terms)
         and row not in exact_matches
     ]
     if not alias_matches:
@@ -530,6 +612,7 @@ def filter_rows(
     query: str,
     member_filter: str,
     selected_filters: dict[str, str],
+    active_terms: list[str] | None,
     date_from: str,
     date_to: str,
     min_priority_score: str,
@@ -565,7 +648,7 @@ def filter_rows(
         for filter_id, _label, columns in FILTER_SPECS:
             selected_value = selected_filters.get(filter_id, "")
             if filter_id == "keyword":
-                matches_dropdown = row_matches_topic(row, selected_value)
+                matches_dropdown = row_matches_topic(row, selected_value, active_terms)
             else:
                 matches_dropdown = row_matches_dropdown(row, columns, selected_value)
             if not matches_dropdown:
@@ -667,413 +750,862 @@ TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>md_cspan Matrix Browser</title>
+  <title>C-SPAN Matrix Browser</title>
   <style>
+    @font-face {
+      font-family: "Pathway Extreme";
+      src: url("/static/fonts/PathwayExtreme-VariableFont_opsz,wdth,wght.ttf") format("truetype");
+      font-weight: 100 900;
+      font-style: normal;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: "Pathway Extreme";
+      src: url("/static/fonts/PathwayExtreme-Italic-VariableFont_opsz,wdth,wght.ttf") format("truetype");
+      font-weight: 100 900;
+      font-style: italic;
+      font-display: swap;
+    }
     :root {
-      --bg: #f5f7fb;
-      --panel: #ffffff;
-      --ink: #172033;
-      --muted: #64748b;
-      --line: #dbe3ef;
       --brand: #0D4D6E;
-      --green: #059669;
-      --slate: #475569;
-      --soft: #eef4ff;
+      --brand-dark: #08354c;
+      --brand-soft: #e7f1f6;
+      --accent: #62b6cb;
+      --bg: #eef3f7;
+      --panel: #ffffff;
+      --panel-soft: #f7fafc;
+      --ink: #102033;
+      --muted: #64748b;
+      --line: #d7e1ea;
+      --line-strong: #b8c9d6;
+      --green: #087f5b;
+      --shadow: 0 18px 45px rgba(15, 23, 42, 0.10);
+      --soft-shadow: 0 8px 24px rgba(15, 23, 42, 0.07);
+    }
+    * {
+      box-sizing: border-box;
     }
     body {
       margin: 0;
-      font-family: "Pathway Extreme", Arial, Helvetica, sans-serif;
-      background: var(--bg);
+      font-family: "Pathway Extreme", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(98, 182, 203, 0.23), transparent 34rem),
+        linear-gradient(180deg, #f7fafc 0%, var(--bg) 100%);
       color: var(--ink);
     }
-    .page {
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 18px;
-    }
-    header {
-      background: var(--brand);
-      color: white;
-      border-radius: 0 0 18px 18px;
-      margin-bottom: 16px;
-      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.18);
-    }
-    header .page {
-      padding-top: 16px;
-      padding-bottom: 16px;
-    }
-    h1 {
-      margin: 0 0 10px;
-      font-size: 26px;
-      letter-spacing: -0.02em;
+    a {
+      color: inherit;
     }
     label {
       display: block;
-      margin-bottom: 4px;
-      font-size: 12px;
-      font-weight: 700;
-      color: inherit;
+      margin-bottom: 7px;
+      color: #38546a;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.075em;
+      text-transform: uppercase;
     }
     input, select, button {
       width: 100%;
-      box-sizing: border-box;
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 8px;
+      border-radius: 12px;
+      padding: 11px 12px;
       font: inherit;
-      background: white;
+      background: #ffffff;
       color: var(--ink);
+    }
+    input, select {
+      min-height: 43px;
+      box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
     }
     input:focus, select:focus {
       border-color: var(--brand);
-      box-shadow: 0 0 0 3px rgba(13, 77, 110, 0.16);
+      box-shadow: 0 0 0 4px rgba(13, 77, 110, 0.15);
       outline: none;
     }
     button, .button {
       cursor: pointer;
       border: 0;
       background: var(--brand);
-      color: white;
-      font-weight: 700;
+      color: #ffffff;
+      font-weight: 800;
       text-decoration: none;
-      display: inline-block;
-      text-align: center;
-      border-radius: 8px;
-      padding: 9px 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border-radius: 12px;
+      padding: 12px 14px;
+      box-shadow: 0 10px 20px rgba(13, 77, 110, 0.20);
     }
-    .button.open {
-      background: var(--green);
-      white-space: nowrap;
+    button:hover, .button:hover {
+      background: var(--brand-dark);
     }
-    .meta-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 8px 14px;
-      color: #d7deea;
-      font-size: 13px;
-      overflow-wrap: anywhere;
-    }
-    .filters-card, .error, .result-card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
-    }
-    .filters-card {
-      padding: 14px;
-      margin-bottom: 14px;
+    .topbar {
       position: sticky;
       top: 0;
-      z-index: 4;
+      z-index: 10;
+      background: rgba(255, 255, 255, 0.92);
+      border-bottom: 1px solid rgba(184, 201, 214, 0.8);
+      backdrop-filter: blur(16px);
     }
-    .filters {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-      align-items: end;
-    }
-    .error {
-      padding: 12px;
-      margin-bottom: 12px;
-      border-color: #fecaca;
-      background: #fef2f2;
-      color: #7f1d1d;
-    }
-    .notice {
-      padding: 12px;
-      margin-bottom: 12px;
-      border: 1px solid #bfdbfe;
-      border-radius: 14px;
-      background: #eff6ff;
-      color: var(--brand);
-      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
-    }
-    .mode-card {
+    .topbar-inner {
+      max-width: 1480px;
+      margin: 0 auto;
+      padding: 14px 24px;
       display: flex;
-      justify-content: space-between;
-      gap: 12px;
       align-items: center;
-      padding: 11px 14px;
-      margin-bottom: 14px;
-      background: #f8fbfd;
-      border: 1px solid #c8ddea;
-      border-radius: 14px;
-      color: var(--brand);
-      font-weight: 800;
-      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+      justify-content: space-between;
+      gap: 18px;
     }
-    .mode-detail {
+    .brand-lockup {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      min-width: 0;
+    }
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, var(--brand), #12698f);
+      color: white;
+      font-weight: 900;
+      letter-spacing: -0.06em;
+      box-shadow: 0 12px 28px rgba(13, 77, 110, 0.28);
+    }
+    h1 {
+      margin: 0;
+      color: var(--brand-dark);
+      font-size: 22px;
+      line-height: 1.1;
+      letter-spacing: -0.035em;
+    }
+    .subtitle {
+      margin-top: 2px;
       color: var(--muted);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
     }
-    .result-list {
+    .top-stats {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .stat-pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: #ffffff;
+      color: #426176;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .stat-pill strong {
+      color: var(--brand);
+    }
+    .app-shell {
+      max-width: 1480px;
+      margin: 0 auto;
+      padding: 22px 24px 34px;
+    }
+    .browser-form {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 22px;
+      align-items: start;
+    }
+    .sidebar {
+      position: sticky;
+      top: 86px;
+      display: grid;
+      gap: 14px;
+      max-height: calc(100vh - 108px);
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .sidebar-card, .content-card, .result-row, .empty, .error, .notice {
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: var(--soft-shadow);
+    }
+    .sidebar-card {
+      padding: 18px;
+    }
+    .sidebar-title {
+      margin: 0 0 3px;
+      color: var(--brand-dark);
+      font-size: 16px;
+      font-weight: 900;
+      letter-spacing: -0.025em;
+    }
+    .sidebar-note {
+      margin: 0 0 17px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .filter-stack {
       display: grid;
       gap: 14px;
     }
-    .result-group {
+    .date-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .source-path {
+      margin-top: 8px;
+      color: #8495a5;
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .main-pane {
+      min-width: 0;
+      display: grid;
+      gap: 16px;
+    }
+    .hero-card {
+      padding: 15px 18px;
+      background:
+        linear-gradient(135deg, rgba(13, 77, 110, 0.96), rgba(18, 105, 143, 0.92)),
+        var(--brand);
+      border-radius: 22px;
+      color: #ffffff;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+    }
+    .hero-card::after {
+      content: "";
+      position: absolute;
+      right: -68px;
+      top: -105px;
+      width: 220px;
+      height: 220px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.10);
+    }
+    .hero-content {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 210px;
+      gap: 14px;
+      align-items: center;
+    }
+    .mode-eyebrow {
+      display: inline-flex;
+      width: fit-content;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 5px 9px;
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.23);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .hero-card h2 {
+      margin: 8px 0 4px;
+      font-size: clamp(22px, 2.8vw, 31px);
+      line-height: 1.02;
+      letter-spacing: -0.045em;
+    }
+    .hero-card p {
+      margin: 0;
+      max-width: 780px;
+      color: rgba(255, 255, 255, 0.82);
+      font-size: 12px;
+      line-height: 1.42;
+    }
+    .sort-control label {
+      color: rgba(255, 255, 255, 0.78);
+    }
+    .sort-control select {
+      border-color: rgba(255, 255, 255, 0.28);
+    }
+    .search-card {
+      padding: 18px;
+    }
+    .search-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 160px;
+      gap: 12px;
+      align-items: end;
+    }
+    .search-card input {
+      min-height: 48px;
+      font-size: 15px;
+    }
+    .helper-text {
+      margin: 9px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .context-card {
+      padding: 18px;
+    }
+    .context-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: start;
+      margin-bottom: 13px;
+    }
+    .context-title {
+      margin: 0;
+      color: var(--brand-dark);
+      font-size: 18px;
+      font-weight: 900;
+      letter-spacing: -0.03em;
+    }
+    .context-subtitle {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: var(--brand-soft);
+      border: 1px solid #c8ddea;
+      color: var(--brand-dark);
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+    .chip.soft {
+      background: #f8fafc;
+      color: #52677a;
+    }
+    .chip.topic {
+      background: var(--brand);
+      border-color: var(--brand);
+      color: #ffffff;
+      box-shadow: 0 8px 18px rgba(13, 77, 110, 0.18);
+    }
+    .chip.toggle {
+      text-decoration: none;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease;
+    }
+    .chip.toggle.active {
+      background: var(--brand-soft);
+      border-color: #9ecbdc;
+      color: var(--brand-dark);
+    }
+    .chip.toggle.inactive {
+      background: #ffffff;
+      border-color: #e2e8f0;
+      color: #8a9aad;
+      opacity: 0.68;
+      text-decoration: line-through;
+      text-decoration-thickness: 1px;
+    }
+    .chip.toggle:hover {
+      opacity: 1;
+      border-color: var(--brand);
+    }
+    .notice {
+      padding: 13px 16px;
+      color: var(--brand-dark);
+      background: #eef8fc;
+      border-color: #bee3ef;
+      font-size: 13px;
+      font-weight: 750;
+    }
+    .error {
+      padding: 13px 16px;
+      border-color: #fecaca;
+      background: #fef2f2;
+      color: #7f1d1d;
+      font-weight: 750;
+    }
+    .results-panel {
       display: grid;
       gap: 12px;
-      margin-bottom: 22px;
+    }
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: end;
+      padding: 2px 2px 0;
+    }
+    .results-header h3 {
+      margin: 0;
+      color: var(--brand-dark);
+      font-size: 20px;
+      letter-spacing: -0.035em;
+    }
+    .results-header p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .result-list {
+      display: grid;
+      gap: 13px;
+    }
+    .result-group {
+      display: grid;
+      gap: 11px;
+      margin-bottom: 18px;
     }
     .group-heading {
-      padding: 10px 2px 2px;
-      border-bottom: 2px solid rgba(13, 77, 110, 0.18);
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      padding: 12px 3px 4px;
+      border-bottom: 1px solid rgba(13, 77, 110, 0.18);
     }
     .group-title {
-      color: var(--brand);
-      font-size: 22px;
-      font-weight: 800;
-      letter-spacing: -0.02em;
+      color: var(--brand-dark);
+      font-size: 19px;
+      font-weight: 950;
+      letter-spacing: -0.035em;
     }
     .group-count {
       color: var(--muted);
-      font-size: 13px;
-      margin-top: 3px;
+      font-size: 12px;
+      font-weight: 800;
     }
-    .result-card {
-      padding: 16px;
-    }
-    .result-top {
+    .result-row {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
+      grid-template-columns: 188px minmax(0, 1fr) 138px;
+      gap: 19px;
       align-items: start;
+      padding: 20px;
+      transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+    }
+    .result-row:hover {
+      transform: translateY(-1px);
+      border-color: var(--line-strong);
+      box-shadow: var(--shadow);
+    }
+    .member-block {
+      min-width: 0;
     }
     .member {
-      font-size: 26px;
-      font-weight: 700;
       color: var(--brand);
-      letter-spacing: -0.02em;
-      line-height: 1.12;
+      font-size: 18px;
+      font-weight: 950;
+      line-height: 1.18;
+      letter-spacing: -0.03em;
       overflow-wrap: anywhere;
+    }
+    .date {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 850;
     }
     .program-title {
-      margin: 7px 0 8px;
-      font-size: 16px;
-      font-weight: 700;
-      color: #334155;
-      line-height: 1.32;
+      margin: 0;
+      color: #16263a;
+      font-size: 19px;
+      font-weight: 900;
+      line-height: 1.3;
+      letter-spacing: -0.025em;
       overflow-wrap: anywhere;
     }
-    .facts {
+    .meta-line {
       display: flex;
       flex-wrap: wrap;
       gap: 7px;
-      margin: 8px 0;
-      color: var(--muted);
-      font-size: 13px;
+      margin-top: 11px;
     }
     .fact {
-      background: var(--soft);
-      border: 1px solid #c8ddea;
+      display: inline-flex;
+      align-items: center;
       border-radius: 999px;
-      padding: 4px 8px;
+      padding: 5px 8px;
+      background: #f3f7fa;
+      border: 1px solid var(--line);
+      color: #51687b;
+      font-size: 11px;
+      font-weight: 850;
+      line-height: 1.2;
+    }
+    .matched-line {
+      margin-top: 12px;
+      color: #40596c;
+      font-size: 13px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .matched-line strong {
+      color: var(--brand-dark);
     }
     .description {
-      margin: 12px 0;
-      line-height: 1.45;
+      margin-top: 12px;
+      color: #41576a;
+      font-size: 14px;
+      line-height: 1.56;
       overflow-wrap: anywhere;
       white-space: pre-wrap;
     }
-    details {
-      margin-top: 12px;
+    .actions {
+      display: grid;
+      gap: 10px;
+      justify-items: stretch;
+    }
+    .button.open {
+      background: var(--brand);
+      white-space: nowrap;
+      font-size: 12px;
+      box-shadow: 0 10px 20px rgba(13, 77, 110, 0.18);
+    }
+    .no-url {
+      text-align: center;
       color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    details {
+      color: var(--muted);
+    }
+    .fields-toggle {
+      grid-column: 1 / -1;
+      margin-top: -4px;
     }
     summary {
       cursor: pointer;
-      font-weight: 700;
       color: var(--brand);
+      font-size: 12px;
+      font-weight: 900;
+      text-align: right;
     }
     .raw-grid {
+      grid-column: 1 / -1;
       display: grid;
-      grid-template-columns: 220px minmax(0, 1fr);
-      gap: 6px 10px;
-      margin-top: 8px;
+      grid-template-columns: 200px minmax(0, 1fr);
+      gap: 7px 12px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
       font-size: 12px;
       overflow-wrap: anywhere;
     }
     .raw-key {
-      font-weight: 700;
-      color: var(--slate);
+      color: #52677a;
+      font-weight: 900;
     }
     .empty {
-      padding: 16px;
+      padding: 20px;
       color: var(--muted);
+      line-height: 1.55;
     }
-    @media (max-width: 850px) {
-      .meta-grid, .filters, .result-top {
+    code {
+      border-radius: 7px;
+      padding: 2px 5px;
+      background: #e9eef3;
+      color: var(--brand-dark);
+    }
+    @media (max-width: 1050px) {
+      .browser-form {
         grid-template-columns: 1fr;
       }
-      .filters-card {
+      .sidebar {
         position: static;
+        max-height: none;
+        overflow: visible;
+      }
+      .filter-stack {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+    @media (max-width: 760px) {
+      .topbar-inner, .app-shell {
+        padding-left: 14px;
+        padding-right: 14px;
+      }
+      .topbar-inner, .hero-content, .search-row, .result-row {
+        grid-template-columns: 1fr;
+      }
+      .topbar-inner {
+        display: grid;
+      }
+      .top-stats {
+        justify-content: start;
+      }
+      .filter-stack, .date-grid {
+        grid-template-columns: 1fr;
+      }
+      .result-row {
+        gap: 12px;
+      }
+      summary {
+        text-align: left;
+      }
+      .raw-grid {
+        grid-template-columns: 1fr;
       }
     }
   </style>
 </head>
 <body>
-  <header>
-    <div class="page">
-      <h1>md_cspan Matrix Browser</h1>
-      <div class="meta-grid">
-        <div><strong>Source:</strong> {{ current_source_label }}</div>
-        <div><strong>Total rows:</strong> {{ total_rows }}</div>
-        <div><strong>Visible rows:</strong> {{ visible_count }}</div>
-        <div style="font-size: 12px; opacity: 0.78;"><strong>Path:</strong> {{ csv_path }}</div>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand-lockup">
+        <div class="brand-mark">MD</div>
+        <div>
+          <h1>C-SPAN Matrix Browser</h1>
+          <div class="subtitle">Read-only member/topic exploration for C-SPAN program leads</div>
+        </div>
+      </div>
+      <div class="top-stats">
+        <div class="stat-pill">Source: <strong>{{ current_source_label }}</strong></div>
+        <div class="stat-pill">Total: <strong>{{ total_rows }}</strong></div>
+        <div class="stat-pill">Visible: <strong>{{ visible_count }}</strong></div>
       </div>
     </div>
   </header>
 
-  <main class="page">
-    {% if error %}
-      <div class="error">{{ error }}</div>
-    {% endif %}
-    {% if alias_note %}
-      <div class="notice">{{ alias_note }}</div>
-    {% endif %}
+  <main class="app-shell">
+    <form id="browser_filters" method="get" action="/" class="browser-form">
+      {% if selected_topic and active_terms_value %}
+        <input type="hidden" id="active_terms_state" name="active_terms" value="{{ active_terms_value }}">
+      {% endif %}
+      <aside class="sidebar" aria-label="Filters">
+        <section class="sidebar-card">
+          <h2 class="sidebar-title">Matrix Filters</h2>
+          <p class="sidebar-note">Narrow the local catalog by member, matrix topic, source, event type, and date.</p>
+          <div class="filter-stack">
+            <div>
+              <label for="csv_path">Source</label>
+              <select id="csv_path" name="csv_path" data-autosubmit>
+                {% for option in source_options %}
+                  <option value="{{ option.path }}" {% if option.path == csv_path %}selected{% endif %}>{{ option.label }}</option>
+                {% endfor %}
+              </select>
+              <div class="source-path">{{ csv_path }}</div>
+            </div>
+            <div>
+              <label for="member">Member</label>
+              <select id="member" name="member" data-autosubmit>
+                <option value="">All Members</option>
+                {% for member in member_values %}
+                  <option value="{{ member }}" {% if member == member_filter %}selected{% endif %}>{{ member }}</option>
+                {% endfor %}
+              </select>
+            </div>
 
-    <form id="browser_filters" method="get" action="/" class="filters-card">
-      <div class="filters">
-        <div>
-          <label for="csv_path">Source</label>
-          <select id="csv_path" name="csv_path" data-autosubmit>
-            {% for option in source_options %}
-              <option value="{{ option.path }}" {% if option.path == csv_path %}selected{% endif %}>{{ option.label }}</option>
+            {% for filter_id, label, columns in filter_specs %}
+              <div>
+                <label for="{{ filter_id }}">{{ label }}</label>
+                <select id="{{ filter_id }}" name="{{ filter_id }}" data-autosubmit>
+                  <option value="">All</option>
+                  {% for option in filter_options.get(filter_id, []) %}
+                    <option value="{{ option }}" {% if option == selected_filters.get(filter_id, "") %}selected{% endif %}>{{ option }}</option>
+                  {% endfor %}
+                </select>
+              </div>
             {% endfor %}
-          </select>
-        </div>
-        <div>
-          <label for="q">Global search</label>
-          <input id="q" name="q" value="{{ query }}" placeholder="title, description, member, keywords" data-debounce-submit>
-        </div>
-        <div>
-          <label for="member">Member</label>
-          <select id="member" name="member" data-autosubmit>
-            <option value="">All</option>
-            {% for member in member_values %}
-              <option value="{{ member }}" {% if member == member_filter %}selected{% endif %}>{{ member }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div>
-          <label for="sort">Sort</label>
-          <select id="sort" name="sort" data-autosubmit>
-            {% for value, label, field, direction, kind in sort_options %}
-              <option value="{{ value }}" {% if value == sort_value %}selected{% endif %}>{{ label }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div>
-          <label for="group_by">Group by</label>
-          <select id="group_by" name="group_by" data-autosubmit>
-            {% for value, label in group_options %}
-              <option value="{{ value }}" {% if value == group_by %}selected{% endif %}>{{ label }}</option>
-            {% endfor %}
-          </select>
-        </div>
 
-        {% for filter_id, label, columns in filter_specs %}
-          <div>
-            <label for="{{ filter_id }}">{{ label }}</label>
-            <select id="{{ filter_id }}" name="{{ filter_id }}" data-autosubmit>
-              <option value="">All</option>
-              {% for option in filter_options.get(filter_id, []) %}
-                <option value="{{ option }}" {% if option == selected_filters.get(filter_id, "") %}selected{% endif %}>{{ option }}</option>
-              {% endfor %}
-            </select>
-          </div>
-        {% endfor %}
-
-        <div>
-          <label for="date_from">Date from</label>
-          <input id="date_from" name="date_from" value="{{ date_from }}" placeholder="YYYY-MM-DD" data-autosubmit>
-        </div>
-        <div>
-          <label for="date_to">Date to</label>
-          <input id="date_to" name="date_to" value="{{ date_to }}" placeholder="YYYY-MM-DD" data-autosubmit>
-        </div>
-        {% if has_priority_score %}
-          <div>
-            <label for="min_priority_score">Min priority score</label>
-            <input id="min_priority_score" name="min_priority_score" value="{{ min_priority_score }}" placeholder="0" data-autosubmit>
-          </div>
-        {% endif %}
-        <div>
-          <label>&nbsp;</label>
-          <button type="submit">Search / Filter / Sort</button>
-        </div>
-      </div>
-    </form>
-
-    {% if rows %}
-      <div class="mode-card">
-        <div>{{ view_mode_label }}</div>
-        <div class="mode-detail">{{ view_mode_detail }}</div>
-      </div>
-      <div class="result-list">
-        {% for group in grouped_rows %}
-          <section class="result-group">
-            {% if group.label %}
-              <div class="group-heading">
-                <div class="group-title">{{ group.label }}</div>
-                <div class="group-count">{{ group.count }} result{% if group.count != 1 %}s{% endif %}</div>
+            <div class="date-grid">
+              <div>
+                <label for="date_from">Date From</label>
+                <input id="date_from" name="date_from" value="{{ date_from }}" placeholder="YYYY-MM-DD" data-autosubmit>
+              </div>
+              <div>
+                <label for="date_to">Date To</label>
+                <input id="date_to" name="date_to" value="{{ date_to }}" placeholder="YYYY-MM-DD" data-autosubmit>
+              </div>
+            </div>
+            {% if has_priority_score %}
+              <div>
+                <label for="min_priority_score">Min Priority Score</label>
+                <input id="min_priority_score" name="min_priority_score" value="{{ min_priority_score }}" placeholder="0" data-autosubmit>
               </div>
             {% endif %}
-            {% for row in group.rows %}
-              <article class="result-card">
-                <div class="result-top">
-                  <div>
-                    <div class="member">{{ card_value(row, "member") or "Unknown member" }}</div>
-                    <div class="program-title">{{ card_value(row, "title") or "Untitled C-SPAN program" }}</div>
-                    <div class="facts">
-                      {% if card_value(row, "date") %}<span class="fact">{{ card_value(row, "date")[:10] }}</span>{% endif %}
-                      {% if card_value(row, "score") %}<span class="fact">Score: {{ card_value(row, "score") }}</span>{% endif %}
-                      {% if card_value(row, "source_type") %}<span class="fact">{{ card_value(row, "source_type") }}</span>{% endif %}
-                      {% if card_value(row, "event_type") %}<span class="fact">{{ card_value(row, "event_type") }}</span>{% endif %}
-                    </div>
-                    {% if card_value(row, "keywords") %}
-                      <div class="facts"><span class="fact">Matched: {{ card_value(row, "keywords") }}</span></div>
-                    {% endif %}
-                  </div>
-                  <div>
-                    {% if row["_url"] %}
-                      <a class="button open" href="{{ row['_url'] }}" target="_blank" rel="noopener noreferrer">Open C-SPAN</a>
-                    {% else %}
-                      <span class="fact">No URL</span>
-                    {% endif %}
-                  </div>
-                </div>
+            <div>
+              <label for="group_by">Group By</label>
+              <select id="group_by" name="group_by" data-autosubmit>
+                {% for value, label in group_options %}
+                  <option value="{{ value }}" {% if value == group_by %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+        </section>
+      </aside>
 
-                {% if card_value(row, "description") %}
-                  <div class="description">{{ cell_text(card_value(row, "description")) }}</div>
-                {% endif %}
-
-                <details>
-                  <summary>All fields</summary>
-                  <div class="raw-grid">
-                    {% for key, value in all_fields(row) %}
-                      <div class="raw-key">{{ key }}</div>
-                      <div>{{ value }}</div>
-                    {% endfor %}
-                  </div>
-                </details>
-              </article>
-            {% endfor %}
-          </section>
-        {% endfor %}
-      </div>
-    {% elif not error %}
-      <div class="filters-card empty">
-        {% if member_filter and selected_filters.get("keyword", "") %}
-          No local catalog rows matched {{ member_filter }} + {{ selected_filters.get("keyword", "") }}.
-          <br><br>
-          This does not prove C-SPAN has no results. Try clearing the topic filter or running the
-          <code>audit-member-topic</code> diagnostic.
-        {% else %}
-          No rows match the current filters.
+      <section class="main-pane">
+        {% if error %}
+          <div class="error">{{ error }}</div>
         {% endif %}
-      </div>
-    {% endif %}
+
+        <section class="hero-card">
+          <div class="hero-content">
+            <div>
+              <div class="mode-eyebrow">{{ view_mode_label }} · {{ view_mode_detail }}</div>
+              <h2>{{ member_filter or "All Members" }}</h2>
+              <p>
+                Browse the local C-SPAN matrix by member priorities, source metadata, dates, and topic aliases.
+                The browser is read-only and uses only local CSV data.
+              </p>
+            </div>
+            <div class="sort-control">
+              <label for="sort">Sort Results</label>
+              <select id="sort" name="sort" data-autosubmit>
+                {% for value, label, field, direction, kind in sort_options %}
+                  <option value="{{ value }}" {% if value == sort_value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+        </section>
+
+        <section class="content-card search-card">
+          <div class="search-row">
+            <div>
+              <label for="q">Global Search</label>
+              <input id="q" name="q" value="{{ query }}" placeholder="Search titles, descriptions, members, keywords" data-debounce-submit>
+            </div>
+            <div>
+              <label>&nbsp;</label>
+              <button type="submit">Search</button>
+            </div>
+          </div>
+          <p class="helper-text">Typing auto-searches after a short pause. Dropdown and date changes update immediately.</p>
+        </section>
+
+        <section class="content-card context-card">
+          <div class="context-head">
+            <div>
+              <h3 class="context-title">Priority Topics & Related Terms</h3>
+              <p class="context-subtitle">
+                {% if selected_topic %}
+                  Current topic context for <strong>{{ selected_topic }}</strong>.
+                {% elif member_filter %}
+                  Matrix topics available for <strong>{{ member_filter }}</strong>.
+                {% else %}
+                  Select a member or topic to focus the matrix context.
+                {% endif %}
+              </p>
+            </div>
+            <span class="chip">{{ visible_count }} visible</span>
+          </div>
+          <div class="chip-row">
+            {% if selected_topic %}
+              <span class="chip topic">{{ selected_topic }}</span>
+              {% for term in related_terms %}
+                <a
+                  class="chip toggle {% if term in active_terms %}active{% else %}inactive{% endif %}"
+                  href="{{ active_term_toggle_url(term, selected_topic, active_terms) }}"
+                  title="{% if term in active_terms %}Turn off{% else %}Turn on{% endif %} {{ term }}"
+                >{{ term }}</a>
+              {% endfor %}
+            {% elif member_filter %}
+              {% for topic in filter_options.get("keyword", [])[:18] %}
+                <span class="chip soft">{{ topic }}</span>
+              {% endfor %}
+            {% else %}
+              <span class="chip soft">All members</span>
+              <span class="chip soft">Global feed</span>
+              <span class="chip soft">{{ current_source_label }}</span>
+            {% endif %}
+          </div>
+        </section>
+
+        {% if alias_note %}
+          <div class="notice">{{ alias_note }}</div>
+        {% endif %}
+
+        {% if rows %}
+          <section class="results-panel">
+            <div class="results-header">
+              <div>
+                <h3>Program Leads</h3>
+                <p>{{ visible_count }} local row{% if visible_count != 1 %}s{% endif %} · {{ current_source_label }}</p>
+              </div>
+              <span class="chip">{{ view_mode_detail }}</span>
+            </div>
+            <div class="result-list">
+              {% for group in grouped_rows %}
+                <section class="result-group">
+                  {% if group.label %}
+                    <div class="group-heading">
+                      <div class="group-title">{{ group.label }}</div>
+                      <div class="group-count">{{ group.count }} result{% if group.count != 1 %}s{% endif %}</div>
+                    </div>
+                  {% endif %}
+                  {% for row in group.rows %}
+                    <article class="result-row">
+                      <div class="member-block">
+                        <div class="member">{{ card_value(row, "member") or "Unknown member" }}</div>
+                        {% if card_value(row, "date") %}<div class="date">{{ card_value(row, "date")[:10] }}</div>{% endif %}
+                      </div>
+                      <div>
+                        <h4 class="program-title">{{ card_value(row, "title") or "Untitled C-SPAN program" }}</h4>
+                        <div class="meta-line">
+                          {% if card_value(row, "score") %}<span class="fact">Score {{ card_value(row, "score") }}</span>{% endif %}
+                          {% if card_value(row, "matrix_priority") %}<span class="fact">{{ card_value(row, "matrix_priority") }}</span>{% endif %}
+                        </div>
+                        {% if card_value(row, "keywords") %}
+                          <div class="matched-line"><strong>Matched:</strong> {{ card_value(row, "keywords") }}</div>
+                        {% endif %}
+                        {% if card_value(row, "description") %}
+                          <div class="description">{{ cell_text(card_value(row, "description"), 360) }}</div>
+                        {% endif %}
+                      </div>
+                      <div class="actions">
+                        {% if row["_url"] %}
+                          <a class="button open" href="{{ row['_url'] }}" target="_blank" rel="noopener noreferrer">Open C-SPAN</a>
+                        {% else %}
+                          <span class="no-url">No URL</span>
+                        {% endif %}
+                      </div>
+                      <details class="fields-toggle">
+                        <summary>All fields</summary>
+                        <div class="raw-grid">
+                          {% for key, value in all_fields(row) %}
+                            <div class="raw-key">{{ key }}</div>
+                            <div>{{ value }}</div>
+                          {% endfor %}
+                        </div>
+                      </details>
+                    </article>
+                  {% endfor %}
+                </section>
+              {% endfor %}
+            </div>
+          </section>
+        {% elif not error %}
+          <div class="empty">
+            {% if member_filter and selected_filters.get("keyword", "") %}
+              No local catalog rows matched {{ member_filter }} + {{ selected_filters.get("keyword", "") }}.
+              <br><br>
+              This does not prove C-SPAN has no results. Try clearing the topic filter or running the
+              <code>audit-member-topic</code> diagnostic.
+            {% else %}
+              No rows match the current filters.
+            {% endif %}
+          </div>
+        {% endif %}
+      </section>
+    </form>
   </main>
   <script>
     (function () {
@@ -1090,8 +1622,22 @@ TEMPLATE = """
         }
       };
 
+      const keywordSelect = document.getElementById("keyword");
+      const activeTermsState = document.getElementById("active_terms_state");
+      const clearActiveTerms = function () {
+        if (activeTermsState) {
+          activeTermsState.value = "";
+          activeTermsState.removeAttribute("name");
+        }
+      };
+
       form.querySelectorAll("[data-autosubmit]").forEach(function (element) {
-        element.addEventListener("change", submitForm);
+        element.addEventListener("change", function () {
+          if (element === keywordSelect) {
+            clearActiveTerms();
+          }
+          submitForm();
+        });
       });
 
       let searchTimer = null;
