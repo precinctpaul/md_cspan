@@ -88,6 +88,27 @@ UPDATE_INDEX_SUMMARY_FIELDNAMES = [
     "failed_reason",
     "suggested_resume_start_member_index",
     "suggested_resume_command",
+    "person_name",
+    "cspan_person_id",
+    "programs_fetched",
+    "added_rows",
+    "already_seen",
+    "skipped",
+    "skip_reasons_summary",
+    "notes",
+]
+
+UPDATE_INDEX_SKIPPED_FIELDNAMES = [
+    "batch",
+    "person_name",
+    "cspan_person_id",
+    "program_id",
+    "program_title",
+    "program_date",
+    "program_url",
+    "skip_reason",
+    "raw_date",
+    "raw_url",
     "notes",
 ]
 
@@ -642,6 +663,16 @@ def update_index_summary_path(output_new_path: Path) -> Path:
         summary_name = f"{Path(summary_name).stem}_summary{output_new_path.suffix}"
 
     return output_new_path.with_name(summary_name)
+
+
+def update_index_skipped_path(output_new_path: Path) -> Path:
+    name = output_new_path.name
+    if "new_programs" in name:
+        skipped_name = name.replace("new_programs", "skipped_programs", 1)
+    else:
+        skipped_name = f"{output_new_path.stem}_skipped_programs{output_new_path.suffix}"
+
+    return output_new_path.with_name(skipped_name)
 
 
 def append_stem_suffix(path_value: str, suffix: str) -> str:
@@ -1245,6 +1276,41 @@ def build_catalog_row(
     }
 
 
+def build_skipped_program_row(
+    batch: str,
+    person_name: str,
+    cspan_person_id: str,
+    program: dict[str, Any],
+    catalog_row: dict[str, Any] | None,
+    skip_reason: str,
+    notes: str = "",
+) -> dict[str, Any]:
+    raw_date = first_value(program, ["date", "time", "airDate", "eventDate", "startDate"], "")
+    raw_url = first_value(program, ["videoLink", "url", "programUrl", "link", "videoUrl", "canonicalUrl"], "")
+
+    return {
+        "batch": batch,
+        "person_name": person_name,
+        "cspan_person_id": cspan_person_id,
+        "program_id": (catalog_row or {}).get("program_id", "") or extract_program_id(program),
+        "program_title": (catalog_row or {}).get("event_title", "") or first_value(program, ["title"], ""),
+        "program_date": (catalog_row or {}).get("event_date", "") or raw_date,
+        "program_url": (catalog_row or {}).get("cspan_url", "") or raw_url,
+        "skip_reason": skip_reason,
+        "raw_date": raw_date,
+        "raw_url": raw_url,
+        "notes": notes,
+    }
+
+
+def increment_count(counts: dict[str, int], key: str, amount: int = 1) -> None:
+    counts[key] = counts.get(key, 0) + amount
+
+
+def counts_summary(counts: dict[str, int]) -> str:
+    return "; ".join(f"{key}: {counts[key]}" for key in sorted(counts))
+
+
 def cmd_raw(args: argparse.Namespace) -> int:
     settings = load_settings()
     client = CSpanClient(settings)
@@ -1828,6 +1894,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     seen_path = Path(args.seen)
     output_new_path = Path(args.output_new)
     summary_path = update_index_summary_path(output_new_path)
+    skipped_path = update_index_skipped_path(output_new_path)
     raw_dir = Path(args.raw_dir)
     raw_search_dir = raw_dir / "search"
 
@@ -1869,10 +1936,14 @@ def cmd_update_index(args: argparse.Namespace) -> int:
             }
 
     new_rows: list[dict[str, Any]] = []
+    skipped_rows: list[dict[str, Any]] = []
+    person_summary_rows: list[dict[str, Any]] = []
     members_processed = 0
     rows_seen = 0
     new_row_count = 0
     existing_row_count = 0
+    skipped_row_count = 0
+    skip_reason_totals: dict[str, int] = {}
     api_errors = 0
     rate_limited = "no"
     notes: list[str] = []
@@ -1903,6 +1974,10 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         member_failed = False
         member_new_rows = 0
         member_existing_rows = 0
+        member_programs_fetched = 0
+        member_skipped_rows = 0
+        member_skip_reason_counts: dict[str, int] = {}
+        member_api_errors = 0
 
         print(f"Updating index for {member_name} ({cspan_person_id})")
 
@@ -1916,6 +1991,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                 data = client.get("/programs/search", params=params)
             except CSpanApiError as exc:
                 api_errors += 1
+                member_api_errors += 1
                 error_note = f"{member_name} page {page}: {exc}"
                 notes.append(error_note.replace("\n", " "))
                 member_failed = True
@@ -1946,25 +2022,62 @@ def cmd_update_index(args: argparse.Namespace) -> int:
 
             programs = normalize_programs_response(data)
             rows_seen += len(programs)
+            member_programs_fetched += len(programs)
             print(f"  Page {page}: {len(programs)} programs")
 
             page_has_row_on_or_after_since = False
             for program in programs:
-                row = build_catalog_row(
-                    member_name=member_name,
-                    member_first=member_first,
-                    member_last=member_last,
-                    cspan_person_id=cspan_person_id,
-                    program=program,
-                    detail=None,
-                    detail_fetched="no",
-                    raw_search_json_path=str(raw_search_path),
-                    raw_detail_json_path="",
-                )
+                try:
+                    row = build_catalog_row(
+                        member_name=member_name,
+                        member_first=member_first,
+                        member_last=member_last,
+                        cspan_person_id=cspan_person_id,
+                        program=program,
+                        detail=None,
+                        detail_fetched="no",
+                        raw_search_json_path=str(raw_search_path),
+                        raw_detail_json_path="",
+                    )
+                except Exception as exc:
+                    skip_reason = "row_build_failed"
+                    skipped_row_count += 1
+                    member_skipped_rows += 1
+                    increment_count(skip_reason_totals, skip_reason)
+                    increment_count(member_skip_reason_counts, skip_reason)
+                    skipped_rows.append(
+                        build_skipped_program_row(
+                            batch=output_new_path.stem,
+                            person_name=member_name,
+                            cspan_person_id=cspan_person_id,
+                            program=program,
+                            catalog_row=None,
+                            skip_reason=skip_reason,
+                            notes=str(exc).replace("\n", " "),
+                        )
+                    )
+                    continue
+
                 row["source_run"] = source_run
                 event_date = row.get("event_date", "")[:10]
                 if since and event_date:
                     if event_date < since:
+                        skip_reason = "before_since_date"
+                        skipped_row_count += 1
+                        member_skipped_rows += 1
+                        increment_count(skip_reason_totals, skip_reason)
+                        increment_count(member_skip_reason_counts, skip_reason)
+                        skipped_rows.append(
+                            build_skipped_program_row(
+                                batch=output_new_path.stem,
+                                person_name=member_name,
+                                cspan_person_id=cspan_person_id,
+                                program=program,
+                                catalog_row=row,
+                                skip_reason=skip_reason,
+                                notes=f"Program date {event_date} is before --since {since}.",
+                            )
+                        )
                         continue
                     page_has_row_on_or_after_since = True
                 elif since and not event_date:
@@ -2005,7 +2118,25 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         if not member_failed:
             last_completed_member_index = str(current_member_index)
             last_completed_member_name = member_name
-            print(f"  Added rows: {member_new_rows}; already seen: {member_existing_rows}")
+        person_summary_rows.append(
+            {
+                "person_name": member_name,
+                "cspan_person_id": cspan_person_id,
+                "programs_fetched": member_programs_fetched,
+                "added_rows": member_new_rows,
+                "already_seen": member_existing_rows,
+                "skipped": member_skipped_rows,
+                "skip_reasons_summary": counts_summary(member_skip_reason_counts),
+                "api_errors": member_api_errors,
+            }
+        )
+        print(f"  Added rows: {member_new_rows}; already seen: {member_existing_rows}; skipped: {member_skipped_rows}")
+        if member_skip_reason_counts:
+            print("  Skip reasons:")
+            for reason, count in sorted(member_skip_reason_counts.items()):
+                print(f"    {reason}: {count}")
+        if member_api_errors:
+            print(f"  API errors: {member_api_errors}")
 
         if rate_limited == "yes":
             break
@@ -2024,6 +2155,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     ]
 
     write_csv_rows(output_new_path, new_rows, INDEX_CATALOG_FIELDNAMES)
+    write_csv_rows(skipped_path, skipped_rows, UPDATE_INDEX_SKIPPED_FIELDNAMES)
     if args.dry_run:
         notes.append("Dry run: catalog and seen ledger were not written.")
     else:
@@ -2031,32 +2163,44 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         write_csv_rows(seen_path, seen_rows_to_write, SEEN_PROGRAM_FIELDNAMES)
 
     run_finished_at = utc_timestamp()
+    run_summary_base = {
+        "run_started_at": run_started_at,
+        "run_finished_at": run_finished_at,
+        "lookup_path": str(lookup_path),
+        "catalog_path": str(catalog_path),
+        "seen_path": str(seen_path),
+        "members_available": len(all_usable_people_rows),
+        "members_processed": members_processed,
+        "rows_seen": rows_seen,
+        "new_rows": new_row_count,
+        "existing_rows": existing_row_count,
+        "api_errors": api_errors,
+        "rate_limited": rate_limited,
+        "last_started_member_index": last_started_member_index,
+        "last_started_member_name": last_started_member_name,
+        "last_completed_member_index": last_completed_member_index,
+        "last_completed_member_name": last_completed_member_name,
+        "failed_member_index": failed_member_index,
+        "failed_member_name": failed_member_name,
+        "failed_reason": failed_reason,
+        "suggested_resume_start_member_index": suggested_resume_start_member_index,
+        "suggested_resume_command": suggested_resume_command,
+        "notes": " | ".join(notes),
+    }
     summary_rows = [
         {
-            "run_started_at": run_started_at,
-            "run_finished_at": run_finished_at,
-            "lookup_path": str(lookup_path),
-            "catalog_path": str(catalog_path),
-            "seen_path": str(seen_path),
-            "members_available": len(all_usable_people_rows),
-            "members_processed": members_processed,
-            "rows_seen": rows_seen,
-            "new_rows": new_row_count,
-            "existing_rows": existing_row_count,
-            "api_errors": api_errors,
-            "rate_limited": rate_limited,
-            "last_started_member_index": last_started_member_index,
-            "last_started_member_name": last_started_member_name,
-            "last_completed_member_index": last_completed_member_index,
-            "last_completed_member_name": last_completed_member_name,
-            "failed_member_index": failed_member_index,
-            "failed_member_name": failed_member_name,
-            "failed_reason": failed_reason,
-            "suggested_resume_start_member_index": suggested_resume_start_member_index,
-            "suggested_resume_command": suggested_resume_command,
-            "notes": " | ".join(notes),
+            **run_summary_base,
+            "person_name": "(run total)",
+            "cspan_person_id": "",
+            "programs_fetched": rows_seen,
+            "added_rows": new_row_count,
+            "already_seen": existing_row_count,
+            "skipped": skipped_row_count,
+            "skip_reasons_summary": counts_summary(skip_reason_totals),
         }
     ]
+    for person_summary_row in person_summary_rows:
+        summary_rows.append({**run_summary_base, **person_summary_row, "notes": ""})
     write_csv_rows(summary_path, summary_rows, UPDATE_INDEX_SUMMARY_FIELDNAMES)
 
     print("Index update complete.")
@@ -2065,11 +2209,13 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     print(f"Start member index: {start_member_index}")
     print(f"Limit members: {limit_members}")
     print(f"Members processed: {members_processed}")
-    print(f"Rows seen: {rows_seen}")
+    print(f"Rows seen/fetched: {rows_seen}")
     print(f"Catalog rows before: {before_catalog_rows}")
     print(f"Catalog rows after: {after_catalog_rows}")
     print(f"New rows: {new_row_count}")
     print(f"Existing rows: {existing_row_count}")
+    print(f"Skipped rows: {skipped_row_count}")
+    print(f"Skip reasons total: {counts_summary(skip_reason_totals) or 'none'}")
     print(f"Duplicate member/person + program groups after run: {len(duplicate_groups_after)}")
     print(f"API errors: {api_errors}")
     print(f"Rate limited: {rate_limited}")
@@ -2088,6 +2234,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         print(f"Catalog rows written: {len(catalog_rows_to_write)}")
         print(f"Seen ledger rows written: {len(seen_rows_to_write)}")
     print(f"Saved new rows to: {output_new_path}")
+    print(f"Saved skipped rows to: {skipped_path}")
     print(f"Saved summary to: {summary_path}")
     print(f"Saved raw JSON under: {raw_dir}")
     return 0
