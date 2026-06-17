@@ -78,6 +78,7 @@ def create_app() -> Flask:
         selected_topic = selected_filters.get("keyword", "")
         active_terms_param = request.args.get("active_terms")
         active_terms = resolve_active_terms(selected_topic, active_terms_param)
+        active_terms_are_narrowed = active_terms_param is not None
 
         rows: list[dict[str, str]] = []
         fieldnames: list[str] = []
@@ -91,13 +92,19 @@ def create_app() -> Flask:
             sort_value = resolve_sort_value(sort_value, member_filter, sort_options)
             group_options = available_group_options(member_filter)
             group_by = resolve_group_by(requested_group_by, member_filter, group_options)
-            alias_note = alias_note_for_filter(rows, member_filter, selected_topic, active_terms)
+            alias_note = alias_note_for_filter(
+                rows,
+                member_filter,
+                selected_topic,
+                active_terms if active_terms_are_narrowed else None,
+            )
             visible_rows = filter_rows(
                 rows=rows,
                 query=query,
                 member_filter=member_filter,
                 selected_filters=selected_filters,
                 active_terms=active_terms,
+                active_terms_are_narrowed=active_terms_are_narrowed,
                 date_from=date_from,
                 date_to=date_to,
                 min_priority_score=min_priority_score,
@@ -128,6 +135,7 @@ def create_app() -> Flask:
             selected_topic=selected_topic,
             related_terms=related_topic_terms(selected_topic),
             active_terms=active_terms,
+            active_terms_are_narrowed=active_terms_are_narrowed,
             active_terms_value=active_terms_value(selected_topic, active_terms, active_terms_param),
             query=query,
             member_filter=member_filter,
@@ -146,6 +154,7 @@ def create_app() -> Flask:
             card_value=card_value,
             topic_aliases=topic_aliases,
             active_term_toggle_url=active_term_toggle_url,
+            context_helper_text=context_helper_text,
             cell_text=cell_text,
             all_fields=all_fields,
         )
@@ -424,6 +433,19 @@ def active_term_toggle_url(term: str, selected_topic: str, active_terms: list[st
     return f"/?{query}" if query else "/"
 
 
+def context_helper_text(
+    selected_topic: str,
+    active_terms: list[str],
+    active_terms_are_narrowed: bool,
+) -> str:
+    if not selected_topic:
+        return ""
+    if active_terms_are_narrowed:
+        term_list = ", ".join(active_terms) if active_terms else "none"
+        return f"Filtering {selected_topic} to active related terms: {term_list}"
+    return f"Showing {selected_topic} using all related terms by default."
+
+
 def split_alias_terms(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[;\n]+", value or "") if part.strip()]
 
@@ -544,25 +566,54 @@ def row_matches_dropdown(row: dict[str, str], columns: list[str], selected_value
     return selected_value in values_for_columns(row, columns)
 
 
+def normalized_match_text(value: str) -> str:
+    text = (value or "").lower()
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    text = text.replace("&", " and ")
+    text = re.sub(r"[/_-]+", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def stem_match_token(token: str) -> str:
+    token = token.strip().lower()
+    for suffix in ["ing", "ed", "es", "s"]:
+        if len(token) > len(suffix) + 3 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def term_match_patterns(term: str) -> list[str]:
+    normalized_term = normalized_match_text(term)
+    if not normalized_term:
+        return []
+
+    patterns = [normalized_term]
+    tokens = normalized_term.split()
+    if len(tokens) == 1:
+        stem = stem_match_token(tokens[0])
+        if stem and stem != tokens[0]:
+            patterns.append(stem)
+    return patterns
+
+
 def term_matches_text(term: str, text: str) -> bool:
-    escaped_term = re.escape(term.strip())
-    if not escaped_term:
+    normalized_text = normalized_match_text(text)
+    if not normalized_text:
         return False
-    return re.search(rf"(?<!\w){escaped_term}(?!\w)", text, flags=re.IGNORECASE) is not None
+
+    for pattern in term_match_patterns(term):
+        escaped_pattern = re.escape(pattern)
+        if " " in pattern:
+            if re.search(rf"(?<!\w){escaped_pattern}(?!\w)", normalized_text):
+                return True
+        elif re.search(rf"(?<!\w){escaped_pattern}\w*", normalized_text):
+            return True
+    return False
 
 
-def row_matches_topic(
-    row: dict[str, str],
-    selected_value: str,
-    active_terms: list[str] | None = None,
-) -> bool:
-    if not selected_value:
-        return True
-
-    if selected_value in values_for_columns(row, TOPIC_COLUMNS):
-        return True
-
-    searchable_text = " ".join(
+def row_topic_searchable_text(row: dict[str, str]) -> str:
+    return " ".join(
         str(row.get(column, ""))
         for column in [
             *TITLE_COLUMNS,
@@ -574,8 +625,33 @@ def row_matches_topic(
             "event_type",
         ]
     )
-    alias_terms = topic_aliases(selected_value) if active_terms is None else [selected_value, *active_terms]
-    return any(term_matches_text(term, searchable_text) for term in alias_terms)
+
+
+def row_active_term_matches(row: dict[str, str], active_terms: list[str]) -> list[str]:
+    searchable_text = row_topic_searchable_text(row)
+    return [
+        term for term in active_terms
+        if term_matches_text(term, searchable_text)
+    ]
+
+
+def row_matches_topic(
+    row: dict[str, str],
+    selected_value: str,
+    active_terms: list[str] | None = None,
+    active_terms_are_narrowed: bool = False,
+) -> bool:
+    if not selected_value:
+        return True
+
+    if active_terms_are_narrowed:
+        return bool(row_active_term_matches(row, active_terms or []))
+
+    if selected_value in values_for_columns(row, TOPIC_COLUMNS):
+        return True
+
+    searchable_text = row_topic_searchable_text(row)
+    return any(term_matches_text(term, searchable_text) for term in topic_aliases(selected_value))
 
 
 def alias_note_for_filter(
@@ -595,7 +671,7 @@ def alias_note_for_filter(
     exact_matches = [row for row in member_rows if selected_topic in values_for_columns(row, TOPIC_COLUMNS)]
     alias_matches = [
         row for row in member_rows
-        if row_matches_topic(row, selected_topic, active_terms)
+        if row_matches_topic(row, selected_topic, active_terms, active_terms_are_narrowed=active_terms is not None)
         and row not in exact_matches
     ]
     if not alias_matches:
@@ -613,6 +689,7 @@ def filter_rows(
     member_filter: str,
     selected_filters: dict[str, str],
     active_terms: list[str] | None,
+    active_terms_are_narrowed: bool,
     date_from: str,
     date_to: str,
     min_priority_score: str,
@@ -648,7 +725,12 @@ def filter_rows(
         for filter_id, _label, columns in FILTER_SPECS:
             selected_value = selected_filters.get(filter_id, "")
             if filter_id == "keyword":
-                matches_dropdown = row_matches_topic(row, selected_value, active_terms)
+                matches_dropdown = row_matches_topic(
+                    row,
+                    selected_value,
+                    active_terms,
+                    active_terms_are_narrowed,
+                )
             else:
                 matches_dropdown = row_matches_dropdown(row, columns, selected_value)
             if not matches_dropdown:
@@ -669,6 +751,8 @@ def filter_rows(
         display_row = dict(row)
         display_row["_row_index"] = index
         display_row["_url"] = row_url(row)
+        if active_terms_are_narrowed and selected_filters.get("keyword", ""):
+            display_row["_active_matches"] = "; ".join(row_active_term_matches(row, active_terms or []))
         visible_rows.append(display_row)
 
     return visible_rows
@@ -1497,7 +1581,7 @@ TEMPLATE = """
               <h3 class="context-title">Priority Topics & Related Terms</h3>
               <p class="context-subtitle">
                 {% if selected_topic %}
-                  Current topic context for <strong>{{ selected_topic }}</strong>.
+                  {{ context_helper_text(selected_topic, active_terms, active_terms_are_narrowed) }}
                 {% elif member_filter %}
                   Matrix topics available for <strong>{{ member_filter }}</strong>.
                 {% else %}
@@ -1565,6 +1649,9 @@ TEMPLATE = """
                         </div>
                         {% if card_value(row, "keywords") %}
                           <div class="matched-line"><strong>Matched:</strong> {{ card_value(row, "keywords") }}</div>
+                        {% endif %}
+                        {% if row.get("_active_matches", "") %}
+                          <div class="matched-line"><strong>Active match:</strong> {{ row.get("_active_matches", "") }}</div>
                         {% endif %}
                         {% if card_value(row, "description") %}
                           <div class="description">{{ cell_text(card_value(row, "description"), 360) }}</div>
