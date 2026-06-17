@@ -152,6 +152,26 @@ ARCHIVE_COMPLETENESS_FIELDNAMES = [
     "warnings",
 ]
 
+COVERAGE_EXCEPTIONS_FIELDNAMES = [
+    "name",
+    "group",
+    "role",
+    "person_type",
+    "party_or_affiliation",
+    "cspan_person_id",
+    "coverage_status",
+    "crawl_floor_status",
+    "catalog_rows",
+    "seen_rows",
+    "priority_rows",
+    "browser_rows",
+    "first_program_date",
+    "last_program_date",
+    "problem_summary",
+    "recommended_next_step",
+    "importance_bucket",
+]
+
 CSPAN_PERSON_ID_AUDIT_FIELDNAMES = [
     "name",
     "group",
@@ -3515,18 +3535,26 @@ def evidence_for_person(
     return evidence_by_person.get(("name", person.get("name", "").strip().lower()), "")
 
 
-def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
-    since = args.since.strip() or "2025-01-03"
-    output_path = Path(args.output)
+def build_archive_completeness_rows(
+    *,
+    since: str,
+    tracked_people_path: Path,
+    catalog_path: Path,
+    seen_path: Path,
+    priority_leads_path: Path,
+    browser_source_path: Path,
+    evidence_dir: Path,
+    include_dry_run_evidence: bool = False,
+) -> list[dict[str, Any]]:
     crawl_evidence_by_person = load_crawl_floor_evidence(
-        output_path.parent,
-        include_dry_run_evidence=args.include_dry_run_evidence,
+        evidence_dir,
+        include_dry_run_evidence=include_dry_run_evidence,
     )
-    tracked_people = load_tracked_people(Path(args.tracked_people))
-    catalog_rows = load_optional_csv_rows(Path(args.catalog))
-    seen_rows = load_optional_csv_rows(Path(args.seen))
-    priority_rows = load_optional_csv_rows(Path(args.priority_leads))
-    browser_rows = load_optional_csv_rows(Path(args.browser_source))
+    tracked_people = load_tracked_people(tracked_people_path)
+    catalog_rows = load_optional_csv_rows(catalog_path)
+    seen_rows = load_optional_csv_rows(seen_path)
+    priority_rows = load_optional_csv_rows(priority_leads_path)
+    browser_rows = load_optional_csv_rows(browser_source_path)
 
     audit_rows: list[dict[str, Any]] = []
     for person in tracked_people:
@@ -3561,6 +3589,7 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
                 "group": person.get("group", ""),
                 "role": person.get("role", ""),
                 "person_type": person.get("person_type", ""),
+                "party_or_affiliation": person.get("party_or_affiliation", ""),
                 "cspan_person_id": person.get("cspan_person_id", ""),
                 "coverage_status": coverage_status,
                 "crawl_floor_status": floor_status,
@@ -3577,6 +3606,23 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
                 "warnings": warnings,
             }
         )
+
+    return audit_rows
+
+
+def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
+    since = args.since.strip() or "2025-01-03"
+    output_path = Path(args.output)
+    audit_rows = build_archive_completeness_rows(
+        since=since,
+        tracked_people_path=Path(args.tracked_people),
+        catalog_path=Path(args.catalog),
+        seen_path=Path(args.seen),
+        priority_leads_path=Path(args.priority_leads),
+        browser_source_path=Path(args.browser_source),
+        evidence_dir=output_path.parent,
+        include_dry_run_evidence=args.include_dry_run_evidence,
+    )
 
     write_csv_rows(output_path, audit_rows, ARCHIVE_COMPLETENESS_FIELDNAMES)
 
@@ -3624,6 +3670,129 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
             f"program_ids={row['program_id_rows']}/{row['catalog_rows_since']} | {warning_text}"
         )
 
+    return 0
+
+
+def coverage_exception_next_step(row: dict[str, Any]) -> str:
+    coverage_status = str(row.get("coverage_status", ""))
+    crawl_status = str(row.get("crawl_floor_status", ""))
+    catalog_rows = int(row.get("catalog_rows_since", 0) or 0)
+
+    if coverage_status == "needs_manual_cspan_id_review" and catalog_rows == 0:
+        return "Run targeted C-SPAN person ID audit or mark as no C-SPAN profile if verified."
+    if coverage_status == "has_id_low_local_rows" and crawl_status == "not_yet_proven":
+        return "Run targeted update-index crawl or verify low-volume profile."
+    if coverage_status == "has_id_low_local_rows" and crawl_status == "reached_since_floor":
+        return "Likely low-volume profile; verify if person is strategically important."
+    if coverage_status == "no_current_congress_rows_found":
+        return "No current-Congress C-SPAN rows found since date; no ingestion needed unless strategically important."
+    return "Review coverage status and decide whether targeted lookup or crawl is needed."
+
+
+def coverage_exception_importance_bucket(row: dict[str, Any]) -> str:
+    priority_rows = int(row.get("priority_rows_since", 0) or 0)
+    if priority_rows > 0:
+        return "high"
+
+    group = str(row.get("group", "")).strip().lower()
+    if group == "majority democrats":
+        return "high"
+    medium_groups = {
+        "the bench",
+        "external democrats",
+        "republican leadership",
+        "trump administration",
+        "other",
+    }
+    if group in medium_groups:
+        return "medium"
+    return "low"
+
+
+def build_coverage_exception_row(row: dict[str, Any]) -> dict[str, Any]:
+    problem_parts = [
+        f"coverage={row.get('coverage_status', '')}",
+        f"crawl_floor={row.get('crawl_floor_status', '')}",
+        f"catalog_rows={row.get('catalog_rows_since', 0)}",
+        f"seen_rows={row.get('seen_rows_since', 0)}",
+    ]
+    warnings = str(row.get("warnings", "")).strip()
+    if warnings:
+        problem_parts.append(f"warnings={warnings}")
+
+    return {
+        "name": row.get("person_name", ""),
+        "group": row.get("group", ""),
+        "role": row.get("role", ""),
+        "person_type": row.get("person_type", ""),
+        "party_or_affiliation": row.get("party_or_affiliation", ""),
+        "cspan_person_id": row.get("cspan_person_id", ""),
+        "coverage_status": row.get("coverage_status", ""),
+        "crawl_floor_status": row.get("crawl_floor_status", ""),
+        "catalog_rows": row.get("catalog_rows_since", 0),
+        "seen_rows": row.get("seen_rows_since", 0),
+        "priority_rows": row.get("priority_rows_since", 0),
+        "browser_rows": row.get("browser_rows_since", 0),
+        "first_program_date": row.get("earliest_local_row", ""),
+        "last_program_date": row.get("latest_local_row", ""),
+        "problem_summary": "; ".join(problem_parts),
+        "recommended_next_step": coverage_exception_next_step(row),
+        "importance_bucket": coverage_exception_importance_bucket(row),
+    }
+
+
+def cmd_export_coverage_exceptions(args: argparse.Namespace) -> int:
+    since = args.since.strip() or "2025-01-03"
+    output_path = Path(args.output)
+    audit_rows = build_archive_completeness_rows(
+        since=since,
+        tracked_people_path=Path(args.tracked_people),
+        catalog_path=Path(args.catalog),
+        seen_path=Path(args.seen),
+        priority_leads_path=Path(args.priority_leads),
+        browser_source_path=Path(args.browser_source),
+        evidence_dir=output_path.parent,
+        include_dry_run_evidence=args.include_dry_run_evidence,
+    )
+
+    included_statuses = {"needs_manual_cspan_id_review", "has_id_low_local_rows"}
+    if args.include_zero_current_congress:
+        included_statuses.add("no_current_congress_rows_found")
+
+    exception_rows = [
+        build_coverage_exception_row(row)
+        for row in audit_rows
+        if row.get("coverage_status", "") in included_statuses
+    ]
+    exception_rows.sort(
+        key=lambda row: (
+            {"high": 0, "medium": 1, "low": 2}.get(str(row.get("importance_bucket", "")), 3),
+            str(row.get("coverage_status", "")),
+            str(row.get("group", "")),
+            str(row.get("name", "")),
+        )
+    )
+
+    write_csv_rows(output_path, exception_rows, COVERAGE_EXCEPTIONS_FIELDNAMES)
+
+    status_counts: dict[str, int] = {}
+    group_counts: dict[str, int] = {}
+    for row in exception_rows:
+        status = str(row.get("coverage_status", ""))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        group = str(row.get("group", "")) or "(blank)"
+        group_counts[group] = group_counts.get(group, 0) + 1
+
+    print("Coverage exceptions export")
+    print(f"Since: {since}")
+    print(f"Total exceptions exported: {len(exception_rows)}")
+    print("Counts by coverage_status:")
+    for status, count in sorted(status_counts.items()):
+        print(f"  {status}: {count}")
+    print("Counts by group:")
+    for group, count in sorted(group_counts.items()):
+        print(f"  {group}: {count}")
+    print(f"Output path: {output_path}")
     return 0
 
 
@@ -3908,6 +4077,21 @@ def build_parser() -> argparse.ArgumentParser:
     audit_archive_parser.add_argument("--output", default="output/cspan_archive_completeness_audit.csv", help="Output audit CSV path.")
     audit_archive_parser.add_argument("--include-dry-run-evidence", action="store_true", help="Allow dry-run update summaries to count as crawl-floor evidence.")
     audit_archive_parser.set_defaults(func=cmd_audit_archive_completeness)
+
+    export_exceptions_parser = subparsers.add_parser(
+        "export-coverage-exceptions",
+        help="Export a focused triage CSV for tracked-person coverage exceptions.",
+    )
+    export_exceptions_parser.add_argument("--since", default="2025-01-03", help="Only count rows on or after this YYYY-MM-DD date.")
+    export_exceptions_parser.add_argument("--tracked-people", default="data/tracked_people.csv", help="Tracked people metadata CSV.")
+    export_exceptions_parser.add_argument("--catalog", default="output/cspan_member_programs_all.csv", help="Master catalog CSV.")
+    export_exceptions_parser.add_argument("--seen", default="output/cspan_seen_programs.csv", help="Seen ledger CSV.")
+    export_exceptions_parser.add_argument("--priority-leads", default="output/cspan_priority_leads_new_programs_md_depth3_merged.csv", help="Priority lead/export CSV to compare.")
+    export_exceptions_parser.add_argument("--browser-source", default="output/cspan_member_programs_all.csv", help="CSV source representing what the browser can show.")
+    export_exceptions_parser.add_argument("--output", default="output/cspan_coverage_exceptions.csv", help="Output coverage exceptions CSV path.")
+    export_exceptions_parser.add_argument("--include-zero-current-congress", action="store_true", help="Also include people with proven no current-Congress rows.")
+    export_exceptions_parser.add_argument("--include-dry-run-evidence", action="store_true", help="Allow dry-run update summaries to count as crawl-floor evidence.")
+    export_exceptions_parser.set_defaults(func=cmd_export_coverage_exceptions)
 
     return parser
 
