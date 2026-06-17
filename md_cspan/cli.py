@@ -72,6 +72,7 @@ UPDATE_INDEX_SUMMARY_FIELDNAMES = [
     "lookup_path",
     "catalog_path",
     "seen_path",
+    "dry_run",
     "members_available",
     "members_processed",
     "rows_seen",
@@ -104,6 +105,7 @@ UPDATE_INDEX_SUMMARY_FIELDNAMES = [
 
 UPDATE_INDEX_SKIPPED_FIELDNAMES = [
     "batch",
+    "dry_run",
     "person_name",
     "cspan_person_id",
     "program_id",
@@ -378,6 +380,43 @@ def usable_people_rows(people_rows: list[dict[str, str]]) -> list[dict[str, str]
             normalized_row["input_last"] = normalized_row.get("last", "").strip()
         usable_rows.append(normalized_row)
     return usable_rows
+
+
+def person_display_name(row: dict[str, str]) -> str:
+    return (
+        row.get("display_name", "").strip()
+        or row.get("name", "").strip()
+        or row.get("cspan_name", "").strip()
+    )
+
+
+def parse_people_filter(value: str) -> list[str]:
+    return [part.strip() for part in (value or "").split(",") if part.strip()]
+
+
+def filter_people_by_exact_names(
+    all_people_rows: list[dict[str, str]],
+    usable_rows: list[dict[str, str]],
+    requested_names: list[str],
+) -> list[dict[str, str]]:
+    if not requested_names:
+        return usable_rows
+
+    all_available_names = {person_display_name(row) for row in all_people_rows}
+    missing_names = [name for name in requested_names if name not in all_available_names]
+    if missing_names:
+        raise ValueError(
+            "Names passed to --only-people were not found in the people input: "
+            + ", ".join(missing_names)
+        )
+
+    usable_names = {person_display_name(row) for row in usable_rows}
+    skipped_names = [name for name in requested_names if name not in usable_names]
+    for name in skipped_names:
+        print(f"Skipping {name}: no usable C-SPAN person ID in input.")
+
+    requested_name_set = set(requested_names)
+    return [row for row in usable_rows if person_display_name(row) in requested_name_set]
 
 
 def program_key_for_row(row: dict[str, Any]) -> str:
@@ -1284,6 +1323,7 @@ def build_catalog_row(
 
 def build_skipped_program_row(
     batch: str,
+    dry_run: str,
     person_name: str,
     cspan_person_id: str,
     program: dict[str, Any],
@@ -1296,6 +1336,7 @@ def build_skipped_program_row(
 
     return {
         "batch": batch,
+        "dry_run": dry_run,
         "person_name": person_name,
         "cspan_person_id": cspan_person_id,
         "program_id": (catalog_row or {}).get("program_id", "") or extract_program_id(program),
@@ -1909,6 +1950,14 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     existing_seen_rows = load_optional_csv_rows(seen_path)
 
     all_usable_people_rows = usable_people_rows(people_rows)
+    requested_people_names = parse_people_filter(getattr(args, "only_people", ""))
+    if requested_people_names:
+        all_usable_people_rows = filter_people_by_exact_names(
+            all_people_rows=people_rows,
+            usable_rows=all_usable_people_rows,
+            requested_names=requested_people_names,
+        )
+
     start_member_index = max(1, int(args.start_member_index))
     limit_members = max(0, int(args.limit_members))
     selected_people_rows = all_usable_people_rows[start_member_index - 1 :]
@@ -2061,6 +2110,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                     skipped_rows.append(
                         build_skipped_program_row(
                             batch=output_new_path.stem,
+                            dry_run="yes" if args.dry_run else "no",
                             person_name=member_name,
                             cspan_person_id=cspan_person_id,
                             program=program,
@@ -2083,6 +2133,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                         skipped_rows.append(
                             build_skipped_program_row(
                                 batch=output_new_path.stem,
+                                dry_run="yes" if args.dry_run else "no",
                                 person_name=member_name,
                                 cspan_person_id=cspan_person_id,
                                 program=program,
@@ -2198,6 +2249,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         "lookup_path": str(lookup_path),
         "catalog_path": str(catalog_path),
         "seen_path": str(seen_path),
+        "dry_run": "yes" if args.dry_run else "no",
         "members_available": len(all_usable_people_rows),
         "members_processed": members_processed,
         "rows_seen": rows_seen,
@@ -2239,6 +2291,8 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     print("Index update complete.")
     print(f"Dry run: {'yes' if args.dry_run else 'no'}")
     print(f"Usable matched members available: {len(all_usable_people_rows)}")
+    if requested_people_names:
+        print(f"Only people: {', '.join(requested_people_names)}")
     print(f"Start member index: {start_member_index}")
     print(f"Limit members: {limit_members}")
     print(f"Members processed: {members_processed}")
@@ -3070,21 +3124,53 @@ def archive_completeness_warnings(
 def archive_coverage_status(
     person: dict[str, str],
     catalog_rows: list[dict[str, Any]],
+    crawl_floor_evidence: str = "",
 ) -> str:
     if not person.get("cspan_person_id", "").strip():
         return "needs_manual_cspan_id_review"
     if not catalog_rows:
+        if crawl_floor_evidence:
+            return "no_current_congress_rows_found"
         return "needs_ingestion"
     if len(catalog_rows) < 3:
         return "has_id_low_local_rows"
     return "likely_complete_enough"
 
 
-def load_crawl_floor_evidence(output_dir: Path) -> dict[tuple[str, str], str]:
+def summary_batch_name(summary_path: Path) -> str:
+    name = summary_path.name
+    if name.startswith("cspan_update_index_") and name.endswith("_summary.csv"):
+        middle = name[len("cspan_update_index_") : -len("_summary.csv")]
+        return f"cspan_new_programs_{middle}"
+    return summary_path.stem.replace("_summary", "")
+
+
+def load_summary_dry_run_by_batch(output_dir: Path) -> dict[str, bool]:
+    dry_run_by_batch: dict[str, bool] = {}
+    for summary_path in sorted(output_dir.glob("cspan_update_index_*_summary.csv")):
+        summary_rows = load_optional_csv_rows(summary_path)
+        summary_is_dry_run = any(
+            row.get("dry_run", "").lower() == "yes"
+            or "dry run:" in row.get("notes", "").lower()
+            for row in summary_rows
+        )
+        dry_run_by_batch[summary_batch_name(summary_path)] = summary_is_dry_run
+    return dry_run_by_batch
+
+
+def load_crawl_floor_evidence(
+    output_dir: Path,
+    include_dry_run_evidence: bool = False,
+) -> dict[tuple[str, str], str]:
     evidence_by_person: dict[tuple[str, str], str] = {}
+    dry_run_by_batch = load_summary_dry_run_by_batch(output_dir)
     for skipped_path in sorted(output_dir.glob("cspan_skipped_programs_*.csv")):
         for row in load_optional_csv_rows(skipped_path):
             if row.get("skip_reason", "") != "before_since_date":
+                continue
+            batch = row.get("batch", "").strip()
+            row_is_dry_run = row.get("dry_run", "").lower() == "yes" or dry_run_by_batch.get(batch, False)
+            if row_is_dry_run and not include_dry_run_evidence:
                 continue
             person_name = row.get("person_name", "").strip()
             cspan_person_id = row.get("cspan_person_id", "").strip()
@@ -3092,12 +3178,21 @@ def load_crawl_floor_evidence(output_dir: Path) -> dict[tuple[str, str], str]:
                 continue
             evidence = f"before_since_date skip found in {skipped_path}"
             if person_name:
-                evidence_by_person.setdefault(("name", person_name.lower()), evidence)
+                evidence_by_person[("name", person_name.lower())] = evidence
             if cspan_person_id:
-                evidence_by_person.setdefault(("id", cspan_person_id), evidence)
+                evidence_by_person[("id", cspan_person_id)] = evidence
 
     for summary_path in sorted(output_dir.glob("cspan_update_index_*_summary.csv")):
-        for row in load_optional_csv_rows(summary_path):
+        summary_rows = load_optional_csv_rows(summary_path)
+        summary_is_dry_run = any(
+            row.get("dry_run", "").lower() == "yes"
+            or "dry run:" in row.get("notes", "").lower()
+            for row in summary_rows
+        )
+        if summary_is_dry_run and not include_dry_run_evidence:
+            continue
+
+        for row in summary_rows:
             if row.get("person_name", "") == "(run total)":
                 continue
             if row.get("empty_page_reached", "").lower() != "yes":
@@ -3108,9 +3203,9 @@ def load_crawl_floor_evidence(output_dir: Path) -> dict[tuple[str, str], str]:
                 continue
             evidence = f"empty page reached in {summary_path}"
             if person_name:
-                evidence_by_person.setdefault(("name", person_name.lower()), evidence)
+                evidence_by_person[("name", person_name.lower())] = evidence
             if cspan_person_id:
-                evidence_by_person.setdefault(("id", cspan_person_id), evidence)
+                evidence_by_person[("id", cspan_person_id)] = evidence
     return evidence_by_person
 
 
@@ -3121,10 +3216,10 @@ def crawl_floor_status(
 ) -> str:
     if not person.get("cspan_person_id", "").strip():
         return "missing_cspan_person_id"
-    if not catalog_rows:
-        return "zero_current_congress_rows"
     if crawl_floor_evidence:
         return "reached_since_floor"
+    if not catalog_rows:
+        return "zero_current_congress_rows"
     return "not_yet_proven"
 
 
@@ -3143,7 +3238,10 @@ def evidence_for_person(
 def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
     since = args.since.strip() or "2025-01-03"
     output_path = Path(args.output)
-    crawl_evidence_by_person = load_crawl_floor_evidence(output_path.parent)
+    crawl_evidence_by_person = load_crawl_floor_evidence(
+        output_path.parent,
+        include_dry_run_evidence=args.include_dry_run_evidence,
+    )
     tracked_people = load_tracked_people(Path(args.tracked_people))
     catalog_rows = load_optional_csv_rows(Path(args.catalog))
     seen_rows = load_optional_csv_rows(Path(args.seen))
@@ -3173,8 +3271,8 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
             seen_rows=person_seen_rows,
             duplicate_group_count=len(duplicate_groups),
         )
-        coverage_status = archive_coverage_status(person, person_catalog_rows)
         crawl_floor_evidence = evidence_for_person(crawl_evidence_by_person, person)
+        coverage_status = archive_coverage_status(person, person_catalog_rows, crawl_floor_evidence)
         floor_status = crawl_floor_status(person, person_catalog_rows, crawl_floor_evidence)
 
         audit_rows.append(
@@ -3231,6 +3329,7 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
     print(f"Seen ledger: {args.seen}")
     print(f"Priority leads: {args.priority_leads}")
     print(f"Browser source: {args.browser_source}")
+    print(f"Include dry-run crawl evidence: {'yes' if args.include_dry_run_evidence else 'no'}")
     print(f"Saved audit CSV to: {output_path}")
     print("")
     print("Rows by person:")
@@ -3401,6 +3500,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_index_parser.add_argument("--start-member-index", default=1, type=int, help="Start at this 1-based usable matched member index.")
     update_index_parser.add_argument("--limit-members", default=0, type=int, help="Only process N matched people. Use 0 for no limit.")
     update_index_parser.add_argument("--limit-people", dest="limit_members", default=argparse.SUPPRESS, type=int, help="Alias for --limit-members.")
+    update_index_parser.add_argument("--only-people", default="", help="Comma-separated exact person names to crawl, preserving input CSV order.")
     update_index_parser.add_argument("--sleep-seconds", default=1.0, type=float, help="Sleep this many seconds between member searches.")
     update_index_parser.add_argument("--since", default="", help="Only add programs on or after this YYYY-MM-DD date.")
     update_index_parser.add_argument("--dry-run", action="store_true", help="Search and write output-new/summary without writing catalog or seen ledger.")
@@ -3513,6 +3613,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_archive_parser.add_argument("--priority-leads", default="output/cspan_priority_leads_new_programs_md_depth3_merged.csv", help="Priority lead/export CSV to compare.")
     audit_archive_parser.add_argument("--browser-source", default="output/cspan_member_programs_all.csv", help="CSV source representing what the browser can show.")
     audit_archive_parser.add_argument("--output", default="output/cspan_archive_completeness_audit.csv", help="Output audit CSV path.")
+    audit_archive_parser.add_argument("--include-dry-run-evidence", action="store_true", help="Allow dry-run update summaries to count as crawl-floor evidence.")
     audit_archive_parser.set_defaults(func=cmd_audit_archive_completeness)
 
     return parser
