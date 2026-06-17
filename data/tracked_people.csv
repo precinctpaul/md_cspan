@@ -5,7 +5,7 @@ George Whitesides,Majority Democrats,Congressman,Democratic,matrix_member,,10275
 Matt Mahan,Majority Democrats,Mayor of San Jose,Democratic,matrix_member,,9267070,2025-01-03,,
 Joe Neguse,Majority Democrats,Congressman,Democratic,matrix_member,,117088,2025-01-03,,
 Michael Bennet,Majority Democrats,US Senator and Candidate for Governor,Democratic,matrix_member,,1031622,2025-01-03,,
-Mike Johnston,Majority Democrats,Mayor of Denver,Democratic,matrix_member,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
+Mike Johnston,Majority Democrats,Mayor of Denver,Democratic,matrix_member,,143736,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 Sarah McBride,Majority Democrats,Congresswoman,Democratic,matrix_member,,103662,2025-01-03,,
 Eileen Higgins,Majority Democrats,Mayor of Miami,Democratic,matrix_member,,140188,2025-01-03,,
 Phil Olaleye,Majority Democrats,State Representative,Democratic,matrix_member,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
@@ -62,13 +62,13 @@ Jamie Ager,The Bench,NC-11,Democratic candidate,bench_candidate,,,2025-01-03,,Ne
 Chuck Schumer,External Democrats,Senate Minority Leader,Democratic,external_figure,Charles Schumer,,2025-01-03,,Needs C-SPAN person lookup.
 Donald Trump,Trump Administration,President,Republican,external_figure,President Trump,,2025-01-03,,Needs C-SPAN person lookup.
 Hakeem Jeffries,External Democrats,House Minority Leader,Democratic,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
-JD Vance,Trump Administration,Vice President,Republican,external_figure,J.D. Vance,,2025-01-03,,Needs C-SPAN person lookup.
+JD Vance,Trump Administration,Vice President,Republican,external_figure,J.D. Vance,105171,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 Joel Valdez,Other,Public figure / staff,Unknown,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
 John Thune,Republican Leadership,Senate Majority Leader,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
-Karoline Leavitt,Trump Administration,White House Press Secretary,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
-Marco Rubio,Trump Administration,Secretary of State,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Karoline Leavitt,Trump Administration,White House Press Secretary,Republican,external_figure,,135461,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
+Marco Rubio,Trump Administration,Secretary of State,Republican,external_figure,,87599,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 Mike Johnson,Republican Leadership,Speaker of the House,Republican,external_figure,Speaker Johnson,,2025-01-03,,Needs C-SPAN person lookup.
-Pete Hegseth,Trump Administration,Secretary of Defense,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
-Scott Bessent,Trump Administration,Treasury Secretary,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Pete Hegseth,Trump Administration,Secretary of Defense,Republican,external_figure,,95436,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
+Scott Bessent,Trump Administration,Treasury Secretary,Republican,external_figure,,140504,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 Steven Cheung,Trump Administration,White House Communications Director,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
-Todd Blanche,Trump Administration,Deputy Attorney General,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Todd Blanche,Trump Administration,Deputy Attorney General,Republican,external_figure,,136597,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
