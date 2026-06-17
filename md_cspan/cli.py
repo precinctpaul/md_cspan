@@ -110,6 +110,7 @@ ARCHIVE_COMPLETENESS_FIELDNAMES = [
     "role",
     "person_type",
     "cspan_person_id",
+    "coverage_status",
     "catalog_rows_since",
     "seen_rows_since",
     "priority_rows_since",
@@ -120,6 +121,21 @@ ARCHIVE_COMPLETENESS_FIELDNAMES = [
     "blank_program_id_rows",
     "duplicate_member_program_groups",
     "warnings",
+]
+
+CSPAN_PERSON_ID_AUDIT_FIELDNAMES = [
+    "name",
+    "group",
+    "role",
+    "current_cspan_person_id",
+    "lookup_status",
+    "candidate_cspan_person_id",
+    "candidate_cspan_name",
+    "candidate_cspan_title",
+    "confidence",
+    "evidence_url",
+    "evidence_text",
+    "notes",
 ]
 
 
@@ -415,6 +431,138 @@ def split_alias_terms(value: str) -> list[str]:
 def normalize_topic_key(value: str) -> str:
     key = re.sub(r"\s+", " ", (value or "").strip().lower())
     return re.sub(r"\s*/\s*", "/", key)
+
+
+def normalize_person_name(value: str) -> str:
+    value = (value or "").lower()
+    value = value.replace(".", "")
+    value = value.replace("-", " ")
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def person_name_variants(person: dict[str, str]) -> list[str]:
+    variants = [person.get("name", "")]
+    aliases = person.get("aliases", "")
+    for alias in re.split(r"[;\n]+", aliases or ""):
+        if alias.strip():
+            variants.append(alias.strip())
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for variant in variants:
+        key = normalize_person_name(variant)
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(variant)
+    return deduped
+
+
+def person_role_terms(person: dict[str, str]) -> set[str]:
+    text = " ".join(
+        [
+            person.get("role", ""),
+            person.get("group", ""),
+            person.get("party_or_affiliation", ""),
+            person.get("person_type", ""),
+        ]
+    ).lower()
+    role_terms: set[str] = set()
+    for term in [
+        "president",
+        "vice president",
+        "senator",
+        "representative",
+        "congressman",
+        "congresswoman",
+        "governor",
+        "mayor",
+        "secretary",
+        "speaker",
+        "leader",
+        "press secretary",
+        "attorney general",
+        "treasury",
+        "defense",
+        "state",
+        "white house",
+        "democratic",
+        "republican",
+    ]:
+        if term in text:
+            role_terms.add(term)
+    return role_terms
+
+
+def cspan_person_evidence_url(person: dict[str, Any]) -> str:
+    person_id = str(person.get("id", "")).strip()
+    if person_id:
+        return f"https://www.c-span.org/person/?{person_id}"
+    public_id = str(person.get("publicId", "")).strip()
+    if public_id:
+        return f"https://www.c-span.org/person/{public_id}"
+    return ""
+
+
+def cspan_person_evidence_text(person: dict[str, Any]) -> str:
+    name = person.get("name", "")
+    title = person.get("title", "")
+    person_id = person.get("id", "")
+    return " | ".join(part for part in [str(person_id), name, title] if part)
+
+
+def cspan_candidate_matches_tracked_name_or_alias(
+    tracked_person: dict[str, str],
+    candidate_name: str,
+) -> bool:
+    candidate_name_key = normalize_person_name(candidate_name)
+    variant_keys = {
+        normalize_person_name(variant)
+        for variant in person_name_variants(tracked_person)
+    }
+    return bool(candidate_name_key and candidate_name_key in variant_keys)
+
+
+def score_cspan_person_candidate(
+    tracked_person: dict[str, str],
+    candidate: dict[str, Any],
+    exact_name_match_count: int,
+) -> tuple[str, str]:
+    title_text = str(candidate.get("title", "")).lower()
+    role_terms = person_role_terms(tracked_person)
+    role_overlap = [term for term in role_terms if term in title_text]
+    exact_name = cspan_candidate_matches_tracked_name_or_alias(
+        tracked_person,
+        str(candidate.get("name", "")),
+    )
+
+    if not exact_name:
+        return ("low", "Candidate name is not an exact tracked-name or alias match.")
+    if exact_name_match_count > 1:
+        return ("needs_review", "Multiple exact-name candidates returned.")
+    if role_terms and not role_overlap:
+        return ("needs_review", "Exact name matched, but C-SPAN title did not clearly match tracked role/group context.")
+    return ("high", "Single exact-name candidate with compatible role/title context." if role_terms else "Single exact-name candidate; no role terms available to disambiguate.")
+
+
+def best_cspan_person_candidate(
+    tracked_person: dict[str, str],
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str, str]:
+    if not candidates:
+        return None, "not_found", "No C-SPAN people returned."
+
+    variant_keys = {normalize_person_name(variant) for variant in person_name_variants(tracked_person)}
+    exact_candidates = [
+        candidate for candidate in candidates
+        if normalize_person_name(str(candidate.get("name", ""))) in variant_keys
+    ]
+    if exact_candidates:
+        candidate = exact_candidates[0]
+        confidence, notes = score_cspan_person_candidate(tracked_person, candidate, len(exact_candidates))
+        return candidate, confidence, notes
+
+    return candidates[0], "low", "No exact-name candidate; first returned candidate requires review."
 
 
 def load_topic_alias_rows(input_path: Path) -> dict[str, list[str]]:
@@ -1672,6 +1820,9 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     run_started_at = utc_timestamp()
     source_run = run_started_at
 
+    if not getattr(args, "lookup", ""):
+        raise ValueError("Provide --lookup or --people.")
+
     lookup_path = Path(args.lookup)
     catalog_path = Path(args.catalog)
     seen_path = Path(args.seen)
@@ -1750,6 +1901,8 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         cursor = ""
         page = 1
         member_failed = False
+        member_new_rows = 0
+        member_existing_rows = 0
 
         print(f"Updating index for {member_name} ({cspan_person_id})")
 
@@ -1820,6 +1973,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                 key = member_program_key(row)
                 if key in seen_rows_by_key:
                     existing_row_count += 1
+                    member_existing_rows += 1
                     seen_row = seen_rows_by_key[key]
                     seen_row["last_seen_at"] = run_started_at
                     seen_row["event_date"] = row.get("event_date", "")
@@ -1827,6 +1981,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
                     continue
 
                 new_row_count += 1
+                member_new_rows += 1
                 new_rows.append(row)
                 seen_rows_by_key[key] = {
                     "member_name": row.get("member_name", ""),
@@ -1850,6 +2005,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         if not member_failed:
             last_completed_member_index = str(current_member_index)
             last_completed_member_name = member_name
+            print(f"  Added rows: {member_new_rows}; already seen: {member_existing_rows}")
 
         if rate_limited == "yes":
             break
@@ -1859,6 +2015,13 @@ def cmd_update_index(args: argparse.Namespace) -> int:
 
     catalog_rows_to_write = [dict(row) for row in existing_catalog_rows] + new_rows
     seen_rows_to_write = list(seen_rows_by_key.values())
+    before_catalog_rows = len(existing_catalog_rows)
+    after_catalog_rows = len(catalog_rows_to_write)
+    duplicate_groups_after = [
+        group_key
+        for group_key, count in duplicate_member_program_counts(catalog_rows_to_write).items()
+        if count > 1
+    ]
 
     write_csv_rows(output_new_path, new_rows, INDEX_CATALOG_FIELDNAMES)
     if args.dry_run:
@@ -1903,8 +2066,11 @@ def cmd_update_index(args: argparse.Namespace) -> int:
     print(f"Limit members: {limit_members}")
     print(f"Members processed: {members_processed}")
     print(f"Rows seen: {rows_seen}")
+    print(f"Catalog rows before: {before_catalog_rows}")
+    print(f"Catalog rows after: {after_catalog_rows}")
     print(f"New rows: {new_row_count}")
     print(f"Existing rows: {existing_row_count}")
+    print(f"Duplicate member/person + program groups after run: {len(duplicate_groups_after)}")
     print(f"API errors: {api_errors}")
     print(f"Rate limited: {rate_limited}")
     print(f"Last started member index: {last_started_member_index}")
@@ -2472,6 +2638,193 @@ def cmd_audit_member_topic(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_cspan_person_ids(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    client = CSpanClient(settings)
+
+    tracked_people = load_tracked_people(Path(args.tracked_people))
+    output_path = Path(args.output)
+    raw_output_path = Path(args.raw_output)
+    sleep_seconds = max(0.0, float(args.sleep_seconds))
+    limit_missing = max(0, int(args.limit_missing))
+
+    audit_rows: list[dict[str, Any]] = []
+    raw_results: dict[str, Any] = {}
+    missing_reviewed = 0
+    stopped_after_rate_limit = False
+
+    for person in tracked_people:
+        name = person.get("name", "")
+        current_id = person.get("cspan_person_id", "").strip()
+        base_row = {
+            "name": name,
+            "group": person.get("group", ""),
+            "role": person.get("role", ""),
+            "current_cspan_person_id": current_id,
+            "lookup_status": "existing_id" if current_id else "",
+            "candidate_cspan_person_id": "",
+            "candidate_cspan_name": "",
+            "candidate_cspan_title": "",
+            "confidence": "existing" if current_id else "",
+            "evidence_url": "",
+            "evidence_text": "",
+            "notes": "Existing C-SPAN person ID preserved." if current_id else "",
+        }
+
+        if current_id and not args.all:
+            audit_rows.append(base_row)
+            continue
+
+        if stopped_after_rate_limit:
+            base_row["lookup_status"] = "skipped_after_rate_limit"
+            base_row["confidence"] = "not_checked"
+            base_row["notes"] = "Skipped because C-SPAN returned 429 earlier in this audit run."
+            audit_rows.append(base_row)
+            continue
+
+        if not current_id:
+            if limit_missing and missing_reviewed >= limit_missing:
+                base_row["lookup_status"] = "skipped_limit"
+                base_row["confidence"] = "not_checked"
+                base_row["notes"] = "--limit-missing reached before lookup."
+                audit_rows.append(base_row)
+                continue
+            missing_reviewed += 1
+
+        params = {"query": name}
+        print(f"Auditing C-SPAN person ID: {name}")
+        try:
+            data = client.get("/people", params=params)
+        except CSpanApiError as exc:
+            base_row["lookup_status"] = "api_error"
+            base_row["confidence"] = "not_checked"
+            base_row["notes"] = str(exc).replace("\n", " ")
+            audit_rows.append(base_row)
+            if is_rate_limit_error(exc):
+                stopped_after_rate_limit = True
+                print(f"Rate limited while auditing C-SPAN person IDs at: {name}")
+                print("Stopping remaining lookups cleanly; rerun later with a larger --sleep-seconds.")
+            continue
+
+        raw_results[name] = data
+        candidates = normalize_people_response(data)
+        candidate, confidence, notes = best_cspan_person_candidate(person, candidates)
+        if candidate is None:
+            base_row["lookup_status"] = "not_found"
+            base_row["confidence"] = "none"
+            base_row["notes"] = notes
+        else:
+            base_row["lookup_status"] = "candidate_found"
+            base_row["candidate_cspan_person_id"] = candidate.get("id", "")
+            base_row["candidate_cspan_name"] = candidate.get("name", "")
+            base_row["candidate_cspan_title"] = candidate.get("title", "")
+            base_row["confidence"] = confidence
+            base_row["evidence_url"] = cspan_person_evidence_url(candidate)
+            base_row["evidence_text"] = cspan_person_evidence_text(candidate)
+            base_row["notes"] = notes
+
+        audit_rows.append(base_row)
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
+
+    write_csv_rows(output_path, audit_rows, CSPAN_PERSON_ID_AUDIT_FIELDNAMES)
+    client.save_json(raw_results, raw_output_path)
+
+    high_confidence = sum(1 for row in audit_rows if row.get("confidence") == "high" and not row.get("current_cspan_person_id"))
+    needs_review = sum(1 for row in audit_rows if row.get("confidence") in ("needs_review", "low"))
+    not_found = sum(1 for row in audit_rows if row.get("lookup_status") == "not_found")
+    existing = sum(1 for row in audit_rows if row.get("lookup_status") == "existing_id")
+    api_errors = sum(1 for row in audit_rows if row.get("lookup_status") == "api_error")
+    skipped_after_rate_limit = sum(1 for row in audit_rows if row.get("lookup_status") == "skipped_after_rate_limit")
+    audit_incomplete = bool(api_errors or skipped_after_rate_limit)
+
+    print("C-SPAN person ID audit complete.")
+    print(f"Audit incomplete due to API limits/errors: {'yes' if audit_incomplete else 'no'}")
+    print(f"Tracked people: {len(audit_rows)}")
+    print(f"Existing IDs preserved: {existing}")
+    print(f"High-confidence blank-ID candidates: {high_confidence}")
+    print(f"Needs review / low confidence: {needs_review}")
+    print(f"Not found: {not_found}")
+    print(f"API errors: {api_errors}")
+    print(f"Skipped after rate limit: {skipped_after_rate_limit}")
+    print(f"Saved audit CSV to: {output_path}")
+    print(f"Saved raw lookup JSON to: {raw_output_path}")
+    return 0
+
+
+def cmd_apply_cspan_person_ids(args: argparse.Namespace) -> int:
+    tracked_path = Path(args.tracked_people)
+    input_path = Path(args.input)
+    tracked_rows = load_csv_rows(tracked_path)
+    audit_rows = load_csv_rows(input_path)
+
+    candidates_by_name = {
+        row.get("name", "").strip(): row
+        for row in audit_rows
+        if row.get("name", "").strip()
+    }
+
+    changes: list[tuple[str, str, str, str, str]] = []
+    skipped_unsafe: list[tuple[str, str, str]] = []
+    updated_rows: list[dict[str, Any]] = []
+    for row in tracked_rows:
+        updated_row = dict(row)
+        name = row.get("name", "").strip()
+        current_id = row.get("cspan_person_id", "").strip()
+        audit_row = candidates_by_name.get(name, {})
+        candidate_id = audit_row.get("candidate_cspan_person_id", "").strip()
+        candidate_name = audit_row.get("candidate_cspan_name", "").strip()
+        confidence = audit_row.get("confidence", "")
+        exact_name_or_alias = cspan_candidate_matches_tracked_name_or_alias(row, candidate_name)
+
+        if candidate_id and confidence == "high" and (args.overwrite or not current_id):
+            if not exact_name_or_alias:
+                skipped_unsafe.append((name, candidate_name, candidate_id))
+                updated_rows.append(updated_row)
+                continue
+            if current_id != candidate_id:
+                updated_row["cspan_person_id"] = candidate_id
+                notes = updated_row.get("notes", "").strip()
+                applied_note = f"Applied high-confidence C-SPAN ID from {input_path.name}."
+                updated_row["notes"] = f"{notes} {applied_note}".strip()
+                changes.append(
+                    (
+                        name,
+                        row.get("group", "").strip(),
+                        row.get("role", "").strip(),
+                        current_id,
+                        candidate_id,
+                    )
+                )
+
+        updated_rows.append(updated_row)
+
+    if args.dry_run:
+        print("Dry run: no files written.")
+    else:
+        backup_path = tracked_path.with_name(f"{tracked_path.stem}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{tracked_path.suffix}")
+        backup_path.write_text(tracked_path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+        write_csv_rows(tracked_path, updated_rows, TRACKED_PEOPLE_FIELDNAMES)
+        print(f"Backup written to: {backup_path}")
+
+    print("C-SPAN person ID apply summary")
+    print(f"Input audit: {input_path}")
+    print(f"Tracked people file: {tracked_path}")
+    print(f"Overwrite existing IDs: {'yes' if args.overwrite else 'no'}")
+    print(f"Changes: {len(changes)}")
+    for name, group, role, old_id, new_id in changes:
+        old_text = old_id or "(blank)"
+        context = " | ".join(part for part in [group, role] if part)
+        context_text = f" [{context}]" if context else ""
+        print(f"- {name}{context_text}: {old_text} -> {new_id}")
+    if skipped_unsafe:
+        print(f"Unsafe high-confidence rows skipped after exact-name/alias recheck: {len(skipped_unsafe)}")
+        for name, candidate_name, candidate_id in skipped_unsafe:
+            print(f"- {name}: candidate {candidate_name} ({candidate_id}) did not exactly match name or alias.")
+
+    return 0
+
+
 def load_tracked_people(input_path: Path) -> list[dict[str, str]]:
     tracked_rows = load_optional_csv_rows(input_path)
     people: list[dict[str, str]] = []
@@ -2534,6 +2887,19 @@ def archive_completeness_warnings(
     return "; ".join(warnings)
 
 
+def archive_coverage_status(
+    person: dict[str, str],
+    catalog_rows: list[dict[str, Any]],
+) -> str:
+    if not person.get("cspan_person_id", "").strip():
+        return "needs_manual_cspan_id_review"
+    if not catalog_rows:
+        return "needs_ingestion"
+    if len(catalog_rows) < 3:
+        return "has_id_low_local_rows"
+    return "likely_complete_enough"
+
+
 def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
     since = args.since.strip() or "2025-01-03"
     tracked_people = load_tracked_people(Path(args.tracked_people))
@@ -2565,6 +2931,7 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
             seen_rows=person_seen_rows,
             duplicate_group_count=len(duplicate_groups),
         )
+        coverage_status = archive_coverage_status(person, person_catalog_rows)
 
         audit_rows.append(
             {
@@ -2573,6 +2940,7 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
                 "role": person.get("role", ""),
                 "person_type": person.get("person_type", ""),
                 "cspan_person_id": person.get("cspan_person_id", ""),
+                "coverage_status": coverage_status,
                 "catalog_rows_since": len(person_catalog_rows),
                 "seen_rows_since": len(person_seen_rows),
                 "priority_rows_since": len(person_priority_rows),
@@ -2593,6 +2961,10 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
     missing_ids = sum(1 for row in audit_rows if not row["cspan_person_id"])
     zero_catalog_rows = sum(1 for row in audit_rows if int(row["catalog_rows_since"]) == 0)
     duplicate_groups_total = sum(int(row["duplicate_member_program_groups"]) for row in audit_rows)
+    status_counts: dict[str, int] = {}
+    for row in audit_rows:
+        status = str(row["coverage_status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
 
     print("Archive completeness audit")
     print(f"Since: {since}")
@@ -2601,6 +2973,9 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
     print(f"People missing C-SPAN person IDs: {missing_ids}")
     print(f"People with zero catalog rows since date: {zero_catalog_rows}")
     print(f"Duplicate member/person + program groups: {duplicate_groups_total}")
+    print("Coverage status counts:")
+    for status, count in sorted(status_counts.items()):
+        print(f"  {status}: {count}")
     print(f"Catalog: {args.catalog}")
     print(f"Seen ledger: {args.seen}")
     print(f"Priority leads: {args.priority_leads}")
@@ -2612,6 +2987,7 @@ def cmd_audit_archive_completeness(args: argparse.Namespace) -> int:
         warning_text = row["warnings"] or "ok"
         print(
             f"- {row['person_name']} | {row['group']} | "
+            f"status={row['coverage_status']} "
             f"catalog={row['catalog_rows_since']} seen={row['seen_rows_since']} "
             f"priority={row['priority_rows_since']} browser={row['browser_rows_since']} "
             f"range={row['earliest_local_row'] or 'n/a'}..{row['latest_local_row'] or 'n/a'} "
@@ -2763,7 +3139,8 @@ def build_parser() -> argparse.ArgumentParser:
         "update-index",
         help="Update a persistent member/program C-SPAN discovery index.",
     )
-    update_index_parser.add_argument("--lookup", required=True, help="Reviewed people lookup CSV.")
+    update_index_parser.add_argument("--lookup", help="Reviewed people lookup CSV.")
+    update_index_parser.add_argument("--people", dest="lookup", default=argparse.SUPPRESS, help="Tracked people CSV. Alias for --lookup.")
     update_index_parser.add_argument("--catalog", required=True, help="Persistent master catalog CSV.")
     update_index_parser.add_argument("--seen", required=True, help="Persistent seen-program ledger CSV.")
     update_index_parser.add_argument("--output-new", required=True, help="Output CSV containing only newly discovered rows.")
@@ -2772,10 +3149,33 @@ def build_parser() -> argparse.ArgumentParser:
     update_index_parser.add_argument("--max-pages-per-member", default=1, type=int, help="Maximum paginated result pages per member.")
     update_index_parser.add_argument("--start-member-index", default=1, type=int, help="Start at this 1-based usable matched member index.")
     update_index_parser.add_argument("--limit-members", default=0, type=int, help="Only process N matched people. Use 0 for no limit.")
+    update_index_parser.add_argument("--limit-people", dest="limit_members", default=argparse.SUPPRESS, type=int, help="Alias for --limit-members.")
     update_index_parser.add_argument("--sleep-seconds", default=1.0, type=float, help="Sleep this many seconds between member searches.")
     update_index_parser.add_argument("--since", default="", help="Only add programs on or after this YYYY-MM-DD date.")
     update_index_parser.add_argument("--dry-run", action="store_true", help="Search and write output-new/summary without writing catalog or seen ledger.")
     update_index_parser.set_defaults(func=cmd_update_index)
+
+    audit_id_parser = subparsers.add_parser(
+        "audit-cspan-person-ids",
+        help="Conservatively audit missing C-SPAN person IDs for tracked people.",
+    )
+    audit_id_parser.add_argument("--tracked-people", default="data/tracked_people.csv", help="Tracked people metadata CSV.")
+    audit_id_parser.add_argument("--output", default="output/cspan_person_id_audit.csv", help="Output audit CSV path.")
+    audit_id_parser.add_argument("--raw-output", default="output/cspan_person_id_audit_raw.json", help="Raw C-SPAN lookup JSON path.")
+    audit_id_parser.add_argument("--sleep-seconds", default=1.0, type=float, help="Sleep this many seconds between C-SPAN people lookups.")
+    audit_id_parser.add_argument("--limit-missing", default=0, type=int, help="Only look up this many missing IDs. Use 0 for no cap.")
+    audit_id_parser.add_argument("--all", action="store_true", help="Also re-check people who already have a C-SPAN ID.")
+    audit_id_parser.set_defaults(func=cmd_audit_cspan_person_ids)
+
+    apply_id_parser = subparsers.add_parser(
+        "apply-cspan-person-ids",
+        help="Apply only high-confidence C-SPAN person ID audit results to tracked_people.csv.",
+    )
+    apply_id_parser.add_argument("--input", required=True, help="Input cspan_person_id_audit.csv.")
+    apply_id_parser.add_argument("--tracked-people", default="data/tracked_people.csv", help="Tracked people metadata CSV to update.")
+    apply_id_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing C-SPAN person IDs when audit confidence is high.")
+    apply_id_parser.add_argument("--dry-run", action="store_true", help="Print changes without writing tracked_people.csv.")
+    apply_id_parser.set_defaults(func=cmd_apply_cspan_person_ids)
 
     merge_parser = subparsers.add_parser(
         "merge-catalogs",
