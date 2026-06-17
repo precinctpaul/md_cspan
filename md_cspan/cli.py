@@ -167,6 +167,13 @@ CSPAN_PERSON_ID_AUDIT_FIELDNAMES = [
     "notes",
 ]
 
+REVIEWED_CSPAN_PERSON_ID_FIELDNAMES = [
+    "tracked_name",
+    "cspan_person_id",
+    "reviewed_candidate_name",
+    "review_reason",
+]
+
 
 PRIORITY_CATALOG_FIELDNAMES = [
     "member_name",
@@ -560,6 +567,46 @@ def person_role_terms(person: dict[str, str]) -> set[str]:
     return role_terms
 
 
+def cspan_title_matches_role_context(person: dict[str, str], candidate: dict[str, Any]) -> bool:
+    role_text = " ".join(
+        [
+            person.get("role", ""),
+            person.get("group", ""),
+            person.get("party_or_affiliation", ""),
+            person.get("person_type", ""),
+        ]
+    ).lower()
+    title_text = str(candidate.get("title", "")).lower()
+
+    if "speaker" in role_text:
+        return "speaker" in title_text
+    if "senate" in role_text or "senator" in role_text:
+        return "senator" in title_text or "senate" in title_text
+    if "house" in role_text or "representative" in role_text or "congress" in role_text:
+        return "representative" in title_text or "house" in title_text or "speaker" in title_text
+    if "president" in role_text and "vice president" not in role_text:
+        return "president" in title_text
+    if "vice president" in role_text:
+        return "vice president" in title_text or "senator" in title_text
+    if "press secretary" in role_text:
+        return "press secretary" in title_text or "spokesperson" in title_text
+    if "communications" in role_text:
+        return "communications" in title_text or "spokesperson" in title_text
+    if "secretary of state" in role_text:
+        return "secretary" in title_text or "senator" in title_text
+    if "treasury secretary" in role_text:
+        return "secretary" in title_text
+    if "secretary of defense" in role_text:
+        return "secretary" in title_text
+    if "deputy attorney general" in role_text:
+        return "deputy attorney general" in title_text or "attorney general" in title_text
+
+    role_terms = person_role_terms(person)
+    if not role_terms:
+        return True
+    return any(term in title_text for term in role_terms)
+
+
 def cspan_person_evidence_url(person: dict[str, Any]) -> str:
     person_id = str(person.get("id", "")).strip()
     if person_id:
@@ -594,21 +641,19 @@ def score_cspan_person_candidate(
     candidate: dict[str, Any],
     exact_name_match_count: int,
 ) -> tuple[str, str]:
-    title_text = str(candidate.get("title", "")).lower()
-    role_terms = person_role_terms(tracked_person)
-    role_overlap = [term for term in role_terms if term in title_text]
     exact_name = cspan_candidate_matches_tracked_name_or_alias(
         tracked_person,
         str(candidate.get("name", "")),
     )
+    role_context_matches = cspan_title_matches_role_context(tracked_person, candidate)
 
     if not exact_name:
         return ("low", "Candidate name is not an exact tracked-name or alias match.")
     if exact_name_match_count > 1:
         return ("needs_review", "Multiple exact-name candidates returned.")
-    if role_terms and not role_overlap:
+    if not role_context_matches:
         return ("needs_review", "Exact name matched, but C-SPAN title did not clearly match tracked role/group context.")
-    return ("high", "Single exact-name candidate with compatible role/title context." if role_terms else "Single exact-name candidate; no role terms available to disambiguate.")
+    return ("high", "Single exact-name candidate with compatible role/title context.")
 
 
 def best_cspan_person_candidate(
@@ -629,6 +674,37 @@ def best_cspan_person_candidate(
         return candidate, confidence, notes
 
     return candidates[0], "low", "No exact-name candidate; first returned candidate requires review."
+
+
+def cspan_person_query_terms(person: dict[str, str]) -> list[str]:
+    return person_name_variants(person)
+
+
+def select_best_audit_candidate(
+    person: dict[str, str],
+    candidate_groups: list[tuple[str, list[dict[str, Any]]]],
+) -> tuple[dict[str, Any] | None, str, str, str]:
+    fallback_candidate: dict[str, Any] | None = None
+    fallback_confidence = "not_found"
+    fallback_notes = "No C-SPAN people returned."
+    fallback_query = ""
+
+    for query_term, candidates in candidate_groups:
+        candidate, confidence, notes = best_cspan_person_candidate(person, candidates)
+        if candidate is None:
+            continue
+        if fallback_candidate is None:
+            fallback_candidate = candidate
+            fallback_confidence = confidence
+            fallback_notes = notes
+            fallback_query = query_term
+        if confidence == "high":
+            return candidate, confidence, f"{notes} Query used: {query_term}.", query_term
+
+    if fallback_candidate is not None:
+        return fallback_candidate, fallback_confidence, f"{fallback_notes} Query used: {fallback_query}.", fallback_query
+
+    return None, "not_found", fallback_notes, ""
 
 
 def load_topic_alias_rows(input_path: Path) -> dict[str, list[str]]:
@@ -2876,7 +2952,14 @@ def cmd_audit_cspan_person_ids(args: argparse.Namespace) -> int:
     settings = load_settings()
     client = CSpanClient(settings)
 
-    tracked_people = load_tracked_people(Path(args.tracked_people))
+    all_tracked_people = load_tracked_people(Path(args.tracked_people))
+    requested_people_names = parse_people_filter(getattr(args, "only_people", ""))
+    tracked_people_by_name = {person.get("name", ""): person for person in all_tracked_people}
+    tracked_people = [
+        tracked_people_by_name[name]
+        for name in requested_people_names
+        if name in tracked_people_by_name
+    ] if requested_people_names else all_tracked_people
     output_path = Path(args.output)
     raw_output_path = Path(args.raw_output)
     sleep_seconds = max(0.0, float(args.sleep_seconds))
@@ -2886,6 +2969,25 @@ def cmd_audit_cspan_person_ids(args: argparse.Namespace) -> int:
     raw_results: dict[str, Any] = {}
     missing_reviewed = 0
     stopped_after_rate_limit = False
+
+    for missing_name in [name for name in requested_people_names if name not in tracked_people_by_name]:
+        print(f"Skipping requested person not found in tracked_people.csv: {missing_name}")
+        audit_rows.append(
+            {
+                "name": missing_name,
+                "group": "",
+                "role": "",
+                "current_cspan_person_id": "",
+                "lookup_status": "missing_requested_name",
+                "candidate_cspan_person_id": "",
+                "candidate_cspan_name": "",
+                "candidate_cspan_title": "",
+                "confidence": "not_checked",
+                "evidence_url": "",
+                "evidence_text": "",
+                "notes": "Requested name was not found in tracked_people.csv.",
+            }
+        )
 
     for person in tracked_people:
         name = person.get("name", "")
@@ -2925,24 +3027,38 @@ def cmd_audit_cspan_person_ids(args: argparse.Namespace) -> int:
                 continue
             missing_reviewed += 1
 
-        params = {"query": name}
         print(f"Auditing C-SPAN person ID: {name}")
-        try:
-            data = client.get("/people", params=params)
-        except CSpanApiError as exc:
-            base_row["lookup_status"] = "api_error"
-            base_row["confidence"] = "not_checked"
-            base_row["notes"] = str(exc).replace("\n", " ")
-            audit_rows.append(base_row)
-            if is_rate_limit_error(exc):
-                stopped_after_rate_limit = True
-                print(f"Rate limited while auditing C-SPAN person IDs at: {name}")
-                print("Stopping remaining lookups cleanly; rerun later with a larger --sleep-seconds.")
+        candidate_groups: list[tuple[str, list[dict[str, Any]]]] = []
+        person_raw_results: dict[str, Any] = {}
+        for query_term in cspan_person_query_terms(person):
+            try:
+                data = client.get("/people", params={"query": query_term})
+            except CSpanApiError as exc:
+                base_row["lookup_status"] = "api_error"
+                base_row["confidence"] = "not_checked"
+                base_row["notes"] = str(exc).replace("\n", " ")
+                audit_rows.append(base_row)
+                if is_rate_limit_error(exc):
+                    stopped_after_rate_limit = True
+                    print(f"Rate limited while auditing C-SPAN person IDs at: {name}")
+                    print("Stopping remaining lookups cleanly; rerun later with a larger --sleep-seconds.")
+                break
+
+            person_raw_results[query_term] = data
+            candidates = normalize_people_response(data)
+            candidate_groups.append((query_term, candidates))
+            candidate, confidence, _notes = best_cspan_person_candidate(person, candidates)
+            if confidence == "high":
+                break
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+
+        if base_row["lookup_status"] == "api_error":
+            raw_results[name] = person_raw_results
             continue
 
-        raw_results[name] = data
-        candidates = normalize_people_response(data)
-        candidate, confidence, notes = best_cspan_person_candidate(person, candidates)
+        raw_results[name] = person_raw_results
+        candidate, confidence, notes, query_used = select_best_audit_candidate(person, candidate_groups)
         if candidate is None:
             base_row["lookup_status"] = "not_found"
             base_row["confidence"] = "none"
@@ -2975,6 +3091,8 @@ def cmd_audit_cspan_person_ids(args: argparse.Namespace) -> int:
     print("C-SPAN person ID audit complete.")
     print(f"Audit incomplete due to API limits/errors: {'yes' if audit_incomplete else 'no'}")
     print(f"Tracked people: {len(audit_rows)}")
+    if requested_people_names:
+        print(f"Only people: {', '.join(requested_people_names)}")
     print(f"Existing IDs preserved: {existing}")
     print(f"High-confidence blank-ID candidates: {high_confidence}")
     print(f"Needs review / low confidence: {needs_review}")
@@ -3055,6 +3173,110 @@ def cmd_apply_cspan_person_ids(args: argparse.Namespace) -> int:
         print(f"Unsafe high-confidence rows skipped after exact-name/alias recheck: {len(skipped_unsafe)}")
         for name, candidate_name, candidate_id in skipped_unsafe:
             print(f"- {name}: candidate {candidate_name} ({candidate_id}) did not exactly match name or alias.")
+
+    return 0
+
+
+def cmd_apply_reviewed_cspan_person_ids(args: argparse.Namespace) -> int:
+    tracked_path = Path(args.tracked_people)
+    input_path = Path(args.input)
+    tracked_rows = load_csv_rows(tracked_path)
+    reviewed_rows = load_csv_rows(input_path)
+
+    tracked_by_name = {
+        row.get("name", "").strip(): row
+        for row in tracked_rows
+        if row.get("name", "").strip()
+    }
+
+    changes: list[tuple[str, str, str, str, str]] = []
+    skipped_rows: list[tuple[str, str]] = []
+    reviewed_by_name: dict[str, dict[str, str]] = {}
+
+    for reviewed_row in reviewed_rows:
+        tracked_name = reviewed_row.get("tracked_name", "").strip()
+        cspan_person_id = reviewed_row.get("cspan_person_id", "").strip()
+        reviewed_candidate_name = reviewed_row.get("reviewed_candidate_name", "").strip()
+        review_reason = reviewed_row.get("review_reason", "").strip()
+
+        if not tracked_name:
+            skipped_rows.append(("(blank)", "tracked_name is required."))
+            continue
+        if tracked_name not in tracked_by_name:
+            skipped_rows.append((tracked_name, "tracked_name not found in tracked_people.csv."))
+            continue
+        if not cspan_person_id or not cspan_person_id.isdigit():
+            skipped_rows.append((tracked_name, "cspan_person_id is required and must be numeric."))
+            continue
+        if not reviewed_candidate_name:
+            skipped_rows.append((tracked_name, "reviewed_candidate_name is required."))
+            continue
+        if not review_reason:
+            skipped_rows.append((tracked_name, "review_reason is required."))
+            continue
+        if tracked_name in reviewed_by_name:
+            skipped_rows.append((tracked_name, "duplicate tracked_name in reviewed input."))
+            continue
+
+        reviewed_by_name[tracked_name] = reviewed_row
+
+    updated_rows: list[dict[str, Any]] = []
+    for row in tracked_rows:
+        updated_row = dict(row)
+        tracked_name = row.get("name", "").strip()
+        reviewed_row = reviewed_by_name.get(tracked_name)
+        if not reviewed_row:
+            updated_rows.append(updated_row)
+            continue
+
+        current_id = row.get("cspan_person_id", "").strip()
+        new_id = reviewed_row.get("cspan_person_id", "").strip()
+        if current_id and not args.overwrite:
+            skipped_rows.append((tracked_name, f"existing cspan_person_id {current_id} preserved; use --overwrite to replace."))
+            updated_rows.append(updated_row)
+            continue
+        if current_id == new_id:
+            skipped_rows.append((tracked_name, f"existing cspan_person_id already equals {new_id}."))
+            updated_rows.append(updated_row)
+            continue
+
+        updated_row["cspan_person_id"] = new_id
+        notes = updated_row.get("notes", "").strip()
+        applied_note = f"Applied reviewed C-SPAN ID from {input_path.name}: {reviewed_row.get('review_reason', '').strip()}."
+        updated_row["notes"] = f"{notes} {applied_note}".strip()
+        changes.append(
+            (
+                tracked_name,
+                row.get("group", "").strip(),
+                row.get("role", "").strip(),
+                current_id,
+                new_id,
+            )
+        )
+        updated_rows.append(updated_row)
+
+    if args.dry_run:
+        print("Dry run: no files written.")
+    else:
+        backup_path = tracked_path.with_name(f"{tracked_path.stem}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{tracked_path.suffix}")
+        backup_path.write_text(tracked_path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+        write_csv_rows(tracked_path, updated_rows, TRACKED_PEOPLE_FIELDNAMES)
+        print(f"Backup written to: {backup_path}")
+
+    print("Reviewed C-SPAN person ID apply summary")
+    print(f"Input reviewed CSV: {input_path}")
+    print(f"Tracked people file: {tracked_path}")
+    print(f"Overwrite existing IDs: {'yes' if args.overwrite else 'no'}")
+    print(f"Changes: {len(changes)}")
+    for name, group, role, old_id, new_id in changes:
+        old_text = old_id or "(blank)"
+        context = " | ".join(part for part in [group, role] if part)
+        context_text = f" [{context}]" if context else ""
+        print(f"- {name}{context_text}: {old_text} -> {new_id}")
+
+    print(f"Skipped rows: {len(skipped_rows)}")
+    for name, reason in skipped_rows:
+        print(f"- {name}: {reason}")
 
     return 0
 
@@ -3515,6 +3737,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_id_parser.add_argument("--raw-output", default="output/cspan_person_id_audit_raw.json", help="Raw C-SPAN lookup JSON path.")
     audit_id_parser.add_argument("--sleep-seconds", default=1.0, type=float, help="Sleep this many seconds between C-SPAN people lookups.")
     audit_id_parser.add_argument("--limit-missing", default=0, type=int, help="Only look up this many missing IDs. Use 0 for no cap.")
+    audit_id_parser.add_argument("--only-people", default="", help="Comma-separated exact tracked person names to audit, preserving supplied order.")
     audit_id_parser.add_argument("--all", action="store_true", help="Also re-check people who already have a C-SPAN ID.")
     audit_id_parser.set_defaults(func=cmd_audit_cspan_person_ids)
 
@@ -3527,6 +3750,16 @@ def build_parser() -> argparse.ArgumentParser:
     apply_id_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing C-SPAN person IDs when audit confidence is high.")
     apply_id_parser.add_argument("--dry-run", action="store_true", help="Print changes without writing tracked_people.csv.")
     apply_id_parser.set_defaults(func=cmd_apply_cspan_person_ids)
+
+    apply_reviewed_id_parser = subparsers.add_parser(
+        "apply-reviewed-cspan-person-ids",
+        help="Apply manually reviewed C-SPAN person IDs from a CSV.",
+    )
+    apply_reviewed_id_parser.add_argument("--input", required=True, help="Reviewed CSV with tracked_name,cspan_person_id,reviewed_candidate_name,review_reason.")
+    apply_reviewed_id_parser.add_argument("--tracked-people", default="data/tracked_people.csv", help="Tracked people metadata CSV to update.")
+    apply_reviewed_id_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing C-SPAN person IDs.")
+    apply_reviewed_id_parser.add_argument("--dry-run", action="store_true", help="Print changes without writing tracked_people.csv.")
+    apply_reviewed_id_parser.set_defaults(func=cmd_apply_reviewed_cspan_person_ids)
 
     merge_parser = subparsers.add_parser(
         "merge-catalogs",

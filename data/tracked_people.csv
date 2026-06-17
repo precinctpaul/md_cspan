@@ -59,16 +59,16 @@ Sarah Trone Garriott,The Bench,IA-03,Democratic candidate,bench_candidate,,,2025
 Cait Conley,The Bench,NY-17,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
 Bob Brooks,The Bench,PA-07,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
 Jamie Ager,The Bench,NC-11,Democratic candidate,bench_candidate,,,2025-01-03,,Needs C-SPAN person lookup or no local rank-1 match.
-Chuck Schumer,External Democrats,Senate Minority Leader,Democratic,external_figure,Charles Schumer,,2025-01-03,,Needs C-SPAN person lookup.
-Donald Trump,Trump Administration,President,Republican,external_figure,President Trump,,2025-01-03,,Needs C-SPAN person lookup.
-Hakeem Jeffries,External Democrats,House Minority Leader,Democratic,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Chuck Schumer,External Democrats,Senate Minority Leader,Democratic,external_figure,Charles Schumer,5929,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
+Donald Trump,Trump Administration,President,Republican,external_figure,President Trump,20967,2025-01-03,,Needs C-SPAN person lookup. Applied reviewed C-SPAN ID from reviewed_cspan_person_ids.csv: Reviewed C-SPAN person page candidate from targeted audit.
+Hakeem Jeffries,External Democrats,House Minority Leader,Democratic,external_figure,,79612,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 JD Vance,Trump Administration,Vice President,Republican,external_figure,J.D. Vance,105171,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 Joel Valdez,Other,Public figure / staff,Unknown,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
-John Thune,Republican Leadership,Senate Majority Leader,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+John Thune,Republican Leadership,Senate Majority Leader,Republican,external_figure,,45552,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 Karoline Leavitt,Trump Administration,White House Press Secretary,Republican,external_figure,,135461,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 Marco Rubio,Trump Administration,Secretary of State,Republican,external_figure,,87599,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
-Mike Johnson,Republican Leadership,Speaker of the House,Republican,external_figure,Speaker Johnson,,2025-01-03,,Needs C-SPAN person lookup.
+Mike Johnson,Republican Leadership,Speaker of the House,Republican,external_figure,Speaker Johnson,106095,2025-01-03,,Needs C-SPAN person lookup. Applied reviewed C-SPAN ID from reviewed_cspan_person_ids.csv: Reviewed C-SPAN person page candidate from targeted audit.
 Pete Hegseth,Trump Administration,Secretary of Defense,Republican,external_figure,,95436,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
 Scott Bessent,Trump Administration,Treasury Secretary,Republican,external_figure,,140504,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
-Steven Cheung,Trump Administration,White House Communications Director,Republican,external_figure,,,2025-01-03,,Needs C-SPAN person lookup.
+Steven Cheung,Trump Administration,White House Communications Director,Republican,external_figure,,140359,2025-01-03,,Needs C-SPAN person lookup. Applied reviewed C-SPAN ID from reviewed_cspan_person_ids.csv: Reviewed C-SPAN person page candidate from targeted audit.
 Todd Blanche,Trump Administration,Deputy Attorney General,Republican,external_figure,,136597,2025-01-03,,Needs C-SPAN person lookup. Applied high-confidence C-SPAN ID from cspan_person_id_audit.csv.
