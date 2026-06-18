@@ -855,6 +855,7 @@ def build_update_index_resume_command(
     failed_page: int = 1,
     failed_cursor: str = "",
     selected_people_rows: list[dict[str, str]] | None = None,
+    output_suffix: str = "_resume",
 ) -> str:
     original_start_member_index = max(1, int(args.start_member_index))
     original_limit_members = max(0, int(args.limit_members))
@@ -886,9 +887,9 @@ def build_update_index_resume_command(
         "--seen",
         str(args.seen),
         "--output-new",
-        append_stem_suffix(str(args.output_new), "_resume"),
+        append_stem_suffix(str(args.output_new), output_suffix),
         "--raw-dir",
-        append_stem_suffix(str(args.raw_dir), "_resume"),
+        append_stem_suffix(str(args.raw_dir), output_suffix),
         "--max-pages-per-member",
         str(args.max_pages_per_member),
         "--sleep-seconds",
@@ -2195,10 +2196,11 @@ def cmd_update_index(args: argparse.Namespace) -> int:
         last_page_fetched = ""
         last_page_program_count = ""
         crawl_stop_reason = "completed"
+        pages_fetched_for_member = 0
 
         print(f"Updating index for {member_name} ({cspan_person_id})")
 
-        while page <= max_pages_per_member:
+        while pages_fetched_for_member < max_pages_per_member:
             query = f"personid:{cspan_person_id}"
             params: dict[str, Any] = {"query": query, "sort": args.sort}
             if cursor:
@@ -2248,6 +2250,7 @@ def cmd_update_index(args: argparse.Namespace) -> int:
             member_programs_fetched += len(programs)
             last_page_fetched = str(page)
             last_page_program_count = str(len(programs))
+            pages_fetched_for_member += 1
             print(f"  Page {page}: {len(programs)} programs")
 
             page_has_row_on_or_after_since = False
@@ -2348,8 +2351,37 @@ def cmd_update_index(args: argparse.Namespace) -> int:
 
             page += 1
 
-        if not member_failed and crawl_stop_reason == "completed" and page > max_pages_per_member:
+        if (
+            not member_failed
+            and crawl_stop_reason == "completed"
+            and pages_fetched_for_member >= max_pages_per_member
+            and cursor
+        ):
             crawl_stop_reason = "max_pages_reached"
+            continue_start_page = int(last_page_fetched or page) + 1
+            suggested_continue_command = build_update_index_resume_command(
+                args=args,
+                resume_start_member_index=current_member_index,
+                failed_because_rate_limit=False,
+                selected_member_count=len(selected_people_rows),
+                failed_selected_offset=selected_offset,
+                failed_page=continue_start_page,
+                failed_cursor=cursor,
+                selected_people_rows=selected_people_rows,
+                output_suffix="_continue",
+            )
+            print(f"  Suggested continue start index: {current_member_index}")
+            print(f"  Suggested continue start page: {continue_start_page}")
+            print("  Suggested continue command:")
+            print(f"  {suggested_continue_command}")
+        elif (
+            not member_failed
+            and crawl_stop_reason == "completed"
+            and pages_fetched_for_member >= max_pages_per_member
+            and int(last_page_program_count or 0) > 0
+            and not cursor
+        ):
+            print("  Page budget reached, but no next cursor was available; not printing a continue command.")
 
         if not member_failed:
             last_completed_member_index = str(current_member_index)

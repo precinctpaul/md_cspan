@@ -983,14 +983,14 @@ TEMPLATE = """
       gap: 13px;
       min-width: 0;
     }
-    .brand-mark {
-      width: 92px;
-      max-width: 22vw;
-      height: 44px;
+    .brand-logo {
+      width: 112px;
+      max-width: 24vw;
+      height: auto;
+      display: block;
       object-fit: contain;
-      border-radius: 10px;
-      background: var(--brand-dark);
-      box-shadow: 0 12px 28px rgba(13, 77, 110, 0.18);
+      border-radius: 8px;
+      box-shadow: 0 8px 20px rgba(13, 77, 110, 0.08);
     }
     h1 {
       margin: 0;
@@ -1484,7 +1484,7 @@ TEMPLATE = """
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand-lockup">
-        <img class="brand-mark" src="/static/images/majority-democrats-logo.jpg" alt="Majority Democrats">
+        <img class="brand-logo" src="/static/images/majority-democrats-logo.jpg" alt="Majority Democrats">
         <div>
           <h1>C-SPAN Matrix Browser</h1>
           <div class="subtitle">Read-only member/topic exploration for C-SPAN program leads</div>
